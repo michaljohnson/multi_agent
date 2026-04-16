@@ -1,33 +1,154 @@
 import json
 import logging
+import re
 
 from multi_agent.llm_client import (
     call_llm, wants_tool_use, is_done, get_tool_calls,
     get_text_content, assistant_message, tool_result_message,
 )
 from multi_agent.mcp_client import MCPClient
-from multi_agent.prompts import NAVIGATOR_GUIDED_PROMPT, NAVIGATOR_SYSTEM_PROMPT
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# Navigator gets nav2 + perception (to see where it is / what's around)
-# NOTE: no segment_objects — it's too permissive (matches any table-like thing).
-# describe_scene uses Claude Vision which understands spatial relationships.
-NAVIGATOR_TOOLS = [
+_SKILL_FILE = Path(__file__).parent / "skills" / "navigator.md"
+
+NAVIGATOR_TOOLS = {
     "nav2__navigate_to_pose",
     "nav2__get_robot_pose",
-    "nav2__get_path_from_robot",
     "nav2__clear_costmaps",
     "nav2__cancel_navigation",
     "perception__describe_scene",
-    "moveit__plan_to_named_state",   # needs forward_looking before nav
-    "moveit__plan_and_execute",      # needs forward_looking before nav
-]
+    "moveit__plan_and_execute",
+}
 
 
 def _filter_tools(all_tools: list[dict]) -> list[dict]:
     """Filter to only the tools the navigator needs."""
     return [t for t in all_tools if t["function"]["name"] in NAVIGATOR_TOOLS]
+
+
+_STOP_WORDS = {"the", "a", "an", "on", "in", "at", "of", "from", "near", "by", "to", "is", "it"}
+
+
+def _object_in_scene(target: str, scene_text: str) -> bool:
+    """Check if target object appears in describe_scene result.
+
+    Parses the JSON to extract the 'objects' list and 'description',
+    then uses difflib to fuzzy-match target words against each listed
+    object. This avoids false positives from common English words in
+    free text (e.g. 'can' as a verb).
+    """
+    from difflib import SequenceMatcher
+
+    target_words = [w for w in target.lower().split() if w not in _STOP_WORDS]
+    if not target_words:
+        return False
+
+    # Try to parse as JSON to get the objects list
+    objects_list = []
+    description = ""
+    try:
+        data = json.loads(scene_text) if isinstance(scene_text, str) else scene_text
+        objects_list = data.get("objects", [])
+        description = data.get("description", "")
+    except (json.JSONDecodeError, TypeError):
+        description = str(scene_text).lower()
+
+    # Check each object in the structured list
+    for obj in objects_list:
+        obj_lower = str(obj).lower()
+        obj_words = obj_lower.replace("_", " ").replace("/", " ").split()
+        # Count how many target words have a good fuzzy match in this object
+        matched = 0
+        for tw in target_words:
+            for ow in obj_words:
+                ratio = SequenceMatcher(None, tw, ow).ratio()
+                if ratio >= 0.7:  # 70% similarity
+                    matched += 1
+                    break
+        if matched >= max(2, len(target_words) // 2):
+            logger.info(f"  object match: '{obj}' matched {matched}/{len(target_words)} target words")
+            return True
+
+    # Fallback: check description for color + object type pattern
+    desc_lower = description.lower()
+    color_words = [w for w in target_words if w in {"red", "blue", "green", "black", "white", "yellow", "orange", "brown", "pink", "grey", "gray"}]
+    if color_words and any(cw in desc_lower for cw in color_words):
+        # Found the color — check if there's also an object-like word nearby
+        object_words = [w for w in target_words if w not in _STOP_WORDS and w not in color_words and len(w) > 2]
+        for ow in object_words:
+            if ow in desc_lower:
+                logger.info(f"  object match: color '{color_words}' + '{ow}' found in description")
+                return True
+
+    logger.info(f"  object match: no match for '{target}' in {len(objects_list)} objects")
+    return False
+
+
+async def _spin_search(
+    mcp: MCPClient,
+    target_object: str,
+    max_spins: int = 5,
+    spin_angle: float = 1.05,
+) -> tuple[bool, str | None, int]:
+    """Deterministic spin-and-search loop (no LLM involved).
+
+    Spins the robot ~60° at a time and calls describe_scene after each spin.
+    Stops early if the target object is found.
+
+    Returns:
+        (found, last_scene_text, tool_calls_used)
+    """
+    tool_calls = 0
+    for i in range(max_spins):
+        # Spin
+        try:
+            await mcp.call_tool_prefixed("nav2__spin_robot", {"angle": spin_angle})
+            tool_calls += 1
+            logger.info(f"  [spin-search {i+1}/{max_spins}] spun {spin_angle:.2f} rad")
+        except Exception as e:
+            logger.error(f"  [spin-search] spin failed: {e}")
+            tool_calls += 1
+            continue
+
+        # Describe
+        try:
+            scene_text = await mcp.call_tool_prefixed("perception__describe_scene", {})
+            tool_calls += 1
+            logger.info(f"  [spin-search {i+1}/{max_spins}] describe_scene -> {scene_text[:600]}")
+        except Exception as e:
+            logger.error(f"  [spin-search] describe_scene failed: {e}")
+            tool_calls += 1
+            continue
+
+        # Check
+        if _object_in_scene(target_object, scene_text):
+            logger.info(f"  [spin-search] FOUND '{target_object}' after {i+1} spins")
+            return True, scene_text, tool_calls
+
+    logger.info(f"  [spin-search] NOT FOUND after {max_spins} spins")
+    return False, None, tool_calls
+
+
+async def _try_spin_search(
+    mcp: MCPClient, target_object: str | None, result: dict
+) -> dict:
+    """If LLM failed but target_object is set, try deterministic spin-search."""
+    if not target_object or result["success"]:
+        return result
+
+    logger.info(f"  LLM didn't find '{target_object}' — starting deterministic spin-search")
+    found, scene_text, spin_calls = await _spin_search(mcp, target_object)
+    result["tool_calls_used"] += spin_calls
+
+    if found:
+        result["success"] = True
+        result["reason"] = (
+            f"Found '{target_object}' after spin-search. "
+            f"Scene: {scene_text[:500] if scene_text else 'N/A'}"
+        )
+    return result
 
 
 async def execute_navigate(
@@ -36,35 +157,19 @@ async def execute_navigate(
     target_object: str | None = None,
     approach_pose: tuple[float, float, float] | None = None,
     model: str = None,
-    max_tool_calls: int = 20,
+    max_tool_calls: int = 8,
 ) -> dict:
     """Run a navigator agent to move the robot to a destination.
 
-    Two modes:
-
-    **Guided mode** (`approach_pose` provided): the navigator is a narrow,
-    bounded skill — it drives directly to the given (x, y, yaw) pose and
-    verifies arrival by looking for `target_object` in the scene. One
-    navigation attempt, one optional clear_costmaps retry. No exploration.
-    This is the preferred mode — the orchestrator owns the map.
-
-    **Exploration mode** (no `approach_pose`): legacy free-reasoning mode
-    where the navigator tries to find the destination by describing its
-    surroundings and picking navigation targets. Unbounded search, prone
-    to getting lost in large unknown maps.
-
     Args:
         mcp: Connected MCPClient instance.
-        destination: Natural language description of where to go
-                     (e.g. "the workbench with tools on it"). Used for
-                     reasoning context.
-        target_object: Optional name of the object to be picked/placed at this
-                       destination (e.g. "clamp"). Used as the primary arrival
-                       signal since vision models describe objects reliably
-                       but rename surfaces.
+        destination: Natural language description of where to go.
+        target_object: Optional name of the object to find at the
+                       destination. If provided, navigator must see it
+                       before reporting success.
         approach_pose: Optional (x, y, yaw) in the map frame. If provided,
-                       activates guided mode — the navigator drives directly
-                       to this pose and verifies.
+                       the navigator drives directly to this pose. If not,
+                       the navigator reasons about where to go.
         model: LiteLLM model string. Defaults to LLM_MODEL env var.
         max_tool_calls: Safety cap on tool calls.
 
@@ -74,43 +179,34 @@ async def execute_navigate(
     all_tools = mcp.get_tools()
     tools = _filter_tools(all_tools)
 
+    system_prompt = _SKILL_FILE.read_text()
+
     if approach_pose is not None:
-        # Guided mode — narrow, bounded skill.
         x, y, yaw = approach_pose
-        system_prompt = NAVIGATOR_GUIDED_PROMPT
-        max_tool_calls = 8  # hard cap: arm tuck + nav + describe + (retry) = ~5
         user_message = (
-            f"Approach pose (map frame): x={x}, y={y}, yaw={yaw} (radians)\n"
-            f'Destination description: "{destination}"\n\n'
-            "Tuck the arm, drive to the approach pose, and verify you are "
-            "at the right LOCATION (surface + room context) using "
-            "describe_scene. Do NOT try to identify any specific object on "
-            "the surface — the executor agent handles that. ONE navigation "
-            "attempt only."
+            f"Navigate to: \"{destination}\"\n"
+            f"Approach pose hint (map frame): x={x}, y={y}, yaw={yaw}\n\n"
+            "Drive to the approach pose and verify you are at the right "
+            "LOCATION (surface + room context) using describe_scene."
         )
+        max_tool_calls = 8  # bounded: arm tuck + nav + describe + retry
         logger.info(
-            f"Navigator started (guided): approach=({x}, {y}, {yaw}) "
-            f"target='{target_object}' dest='{destination}'"
+            f"Navigator started (with pose hint): ({x}, {y}, {yaw}) "
+            f"dest='{destination}'"
         )
     else:
-        # Exploration mode — legacy free-reasoning path.
-        system_prompt = NAVIGATOR_SYSTEM_PROMPT
-        user_message = f"Navigate the robot to: {destination}\n\n"
-        if target_object:
-            user_message += (
-                f"Target object at this location: '{target_object}'. "
-                f"Use this as your primary arrival signal — if you can see the "
-                f"object (or a plausible match for it) in the scene description, "
-                f"you are at the right place.\n\n"
-            )
-        user_message += (
-            "Use perception to look around and nav2 to move. "
-            "Confirm you have arrived at the right location before reporting success."
+        target_line = (
+            f"\nTarget object to find: \"{target_object}\"\n"
+            if target_object else ""
         )
-        logger.info(
-            f"Navigator started (exploration): go to '{destination}'"
-            + (f" (target: '{target_object}')" if target_object else "")
+        user_message = (
+            f"Navigate to: \"{destination}\"\n"
+            f"{target_line}\n"
+            "No approach pose provided. Use perception to orient yourself, "
+            "reason about where the destination is, navigate there, and "
+            "verify arrival."
         )
+        logger.info(f"Navigator started (open): dest='{destination}' target='{target_object}'")
 
     messages = [
         {"role": "system", "content": system_prompt},
@@ -133,8 +229,6 @@ async def execute_navigate(
 
                 try:
                     result = await mcp.call_tool_prefixed(tc_name, tc_args)
-                    # Log describe_scene results so we can see what the LLM
-                    # is reasoning from when it decides whether to stop.
                     if tc_name == "perception__describe_scene":
                         logger.info(
                             f"  [nav {tool_call_count}] describe_scene -> {result[:800]}"
@@ -154,12 +248,18 @@ async def execute_navigate(
             final_text = get_text_content(response)
             logger.info(f"Navigator finished: {final_text[:200]}")
 
-            success = "SUCCESS" in final_text.upper()
-            return {
+            # Find last standalone SUCCESS/FAILURE word (not "successfully" etc.)
+            s_matches = list(re.finditer(r'\bSUCCESS\b', final_text, re.IGNORECASE))
+            f_matches = list(re.finditer(r'\bFAILURE\b', final_text, re.IGNORECASE))
+            last_s = s_matches[-1].start() if s_matches else -1
+            last_f = f_matches[-1].start() if f_matches else -1
+            success = last_s > last_f
+            result = {
                 "success": success,
                 "reason": final_text,
                 "tool_calls_used": tool_call_count,
             }
+            return await _try_spin_search(mcp, target_object, result)
         else:
             stop = response.choices[0].finish_reason
             logger.warning(f"Unexpected finish_reason: {stop}")
@@ -170,8 +270,9 @@ async def execute_navigate(
             }
 
     logger.warning(f"Navigator hit max tool calls ({max_tool_calls})")
-    return {
+    result = {
         "success": False,
         "reason": f"Exceeded maximum tool calls ({max_tool_calls})",
         "tool_calls_used": tool_call_count,
     }
+    return await _try_spin_search(mcp, target_object, result)

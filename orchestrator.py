@@ -6,26 +6,25 @@ from multi_agent.llm_client import (
     get_text_content, assistant_message, tool_result_message,
 )
 from multi_agent.mcp_client import MCPClient
-from multi_agent.executor import execute_pick_and_place
+from multi_agent.pick_and_place import execute_pick_and_place
 from multi_agent.navigator import execute_navigate
-from multi_agent.prompts import ORCHESTRATOR_SYSTEM_PROMPT
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+_SKILL_FILE = Path(__file__).parent / "skills" / "orchestrator.md"
 
-# Custom tools the orchestrator can call (not MCP tools — Python-implemented)
+
+# Custom tools the orchestrator can call (Python-implemented, not MCP)
 ORCHESTRATOR_TOOLS = [
     {
         "type": "function",
         "function": {
             "name": "navigate",
             "description": (
-                "Navigate the robot to a destination. Spawns a navigator skill "
-                "that drives directly to a given approach_pose and verifies by "
-                "target_object. The navigator is narrow and bounded — it does "
-                "NOT explore. You (the orchestrator) own the map and must "
-                "provide approach_pose in the map frame. Pass target_object so "
-                "the navigator can verify arrival by seeing the object."
+                "Navigate the robot to a destination. Spawns a navigator agent "
+                "that uses its own environment knowledge to drive there and "
+                "verifies arrival using perception."
             ),
             "parameters": {
                 "type": "object",
@@ -33,32 +32,12 @@ ORCHESTRATOR_TOOLS = [
                     "destination": {
                         "type": "string",
                         "description": (
-                            "Natural language description of the destination "
-                            "(used for logging / context only, NOT for reasoning)."
-                        ),
-                    },
-                    "target_object": {
-                        "type": "string",
-                        "description": (
-                            "Name of the object to pick or place at this location "
-                            "(e.g. 'clamp'). Used as the arrival signal — the "
-                            "navigator reports SUCCESS if this object is visible."
-                        ),
-                    },
-                    "approach_pose": {
-                        "type": "array",
-                        "items": {"type": "number"},
-                        "minItems": 3,
-                        "maxItems": 3,
-                        "description": (
-                            "(x, y, yaw) pose in the map frame. The navigator "
-                            "drives directly to this pose — no exploration. "
-                            "You must look up the correct pose from your map "
-                            "knowledge for the requested destination."
+                            "Natural language description of where to go "
+                            "(e.g. 'the wooden coffee table in the living room')."
                         ),
                     },
                 },
-                "required": ["destination", "target_object", "approach_pose"],
+                "required": ["destination"],
             },
         },
     },
@@ -67,16 +46,17 @@ ORCHESTRATOR_TOOLS = [
         "function": {
             "name": "pick",
             "description": (
-                "Pick up an object that is near the robot. The robot must already "
-                "be positioned close enough to reach the object. Spawns an executor "
-                "agent that handles perception, grasp planning, and manipulation."
+                "Pick up an object near the robot. The robot must already be "
+                "positioned close enough to reach it (call navigate first). "
+                "Spawns a pick-and-place agent that handles perception, grasp "
+                "planning, and manipulation."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "object_name": {
                         "type": "string",
-                        "description": "Name of the object to pick up (e.g. 'clamp', 'tablet')",
+                        "description": "Name of the object to pick up.",
                     },
                 },
                 "required": ["object_name"],
@@ -88,30 +68,23 @@ ORCHESTRATOR_TOOLS = [
         "function": {
             "name": "place",
             "description": (
-                "Place the currently held object on a surface in front of the robot. "
-                "The robot must already be positioned near the target surface. "
-                "Spawns an executor agent that lowers the object, releases, and retracts."
+                "Place the currently held object on the surface in front of "
+                "the robot. The robot must already be near the target surface. "
+                "Spawns a pick-and-place agent that lowers the object, "
+                "releases, and retracts."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "surface_height": {
                         "type": "number",
-                        "description": "Height of the target surface in meters (e.g. 0.80 for a table)",
+                        "description": (
+                            "Height of the target surface in meters "
+                            "(e.g. 0.45 for coffee table, 0.75 for dining table)."
+                        ),
                     },
                 },
                 "required": ["surface_height"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_robot_pose",
-            "description": "Get the current robot position and orientation in the map frame.",
-            "parameters": {
-                "type": "object",
-                "properties": {},
             },
         },
     },
@@ -127,14 +100,9 @@ async def _handle_tool_call(
 ) -> str:
     """Handle a tool call from the orchestrator."""
     if tool_name == "navigate":
-        # approach_pose comes over JSON as a list; cast to tuple for the navigator.
-        raw_pose = tool_input.get("approach_pose")
-        approach_pose = tuple(raw_pose) if raw_pose is not None else None
         result = await execute_navigate(
             mcp=mcp,
             destination=tool_input["destination"],
-            target_object=tool_input.get("target_object"),
-            approach_pose=approach_pose,
             model=navigator_model,
         )
         return json.dumps(result)
@@ -158,79 +126,41 @@ async def _handle_tool_call(
         )
         return json.dumps(result)
 
-    elif tool_name == "get_robot_pose":
-        result = await mcp.call_tool("nav2-mcp-server", "get_robot_pose", {})
-        return result
-
     else:
         return f"Unknown tool: {tool_name}"
 
 
 async def run_orchestrator(
     mcp: MCPClient,
-    task_list: list[dict],
-    location_map: dict[str, tuple[float, float, float]],
+    task: str,
     orchestrator_model: str = None,
     executor_model: str = None,
     navigator_model: str = None,
     max_turns: int = 50,
 ) -> dict:
-    """Run the orchestrator agent to clean a room.
+    """Run the orchestrator agent with an open-ended task.
 
     Args:
         mcp: Connected MCPClient instance.
-        task_list: List of dicts with 'object', 'pickup_location',
-                   'place_location', and 'surface_height' keys.
-        location_map: Dict of known location names -> (x, y, yaw) approach
-                      poses in the map frame. Injected into the user
-                      message so the orchestrator LLM knows which exact
-                      approach_pose to pass to the navigate tool.
-        orchestrator_model: LiteLLM model string. Defaults to LLM_MODEL env var.
-        executor_model: LiteLLM model string. Defaults to LLM_MODEL env var.
-        navigator_model: LiteLLM model string. Defaults to LLM_MODEL env var.
+        task: Natural language task description (e.g. "pick up the clamp
+              from the coffee table and put it on the kitchen table").
+        orchestrator_model: LiteLLM model string.
+        executor_model: LiteLLM model string for pick-and-place agents.
+        navigator_model: LiteLLM model string for navigator agents.
         max_turns: Safety cap on orchestrator turns.
 
     Returns:
         {"summary": str, "turns_used": int}
     """
-    # Build user message from task list
-    task_descriptions = []
-    for i, task in enumerate(task_list, 1):
-        task_descriptions.append(
-            f"{i}. Pick up the '{task['object']}' from {task['pickup_location']} "
-            f"and place it on {task['place_location']} "
-            f"(surface height: {task['surface_height']}m)"
-        )
-
-    # Known locations with exact approach poses — the orchestrator must
-    # reuse these exact values when calling the navigate tool. Without
-    # this, the LLM has no source for the required approach_pose field
-    # and will hallucinate coordinates.
-    location_lines = [
-        f"- {name}: approach_pose=({x}, {y}, {yaw})"
-        for name, (x, y, yaw) in location_map.items()
-    ]
-    known_locations_block = (
-        "Known locations (use these EXACT approach_pose values when calling "
-        "the navigate tool — do NOT invent coordinates):\n"
-        + "\n".join(location_lines)
-    )
-
-    user_message = (
-        "Clean the room by picking up the following objects and placing them "
-        "at their target locations:\n\n"
-        + "\n".join(task_descriptions)
-        + "\n\n"
-        + known_locations_block
-    )
+    system_prompt = _SKILL_FILE.read_text()
 
     messages = [
-        {"role": "system", "content": ORCHESTRATOR_SYSTEM_PROMPT},
-        {"role": "user", "content": user_message},
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": task},
     ]
     turn_count = 0
 
-    logger.info(f"Orchestrator started with {len(task_list)} objects")
+    logger.info(f"Orchestrator started: {task[:200]}")
 
     while turn_count < max_turns:
         turn_count += 1

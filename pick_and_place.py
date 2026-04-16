@@ -6,28 +6,28 @@ from multi_agent.llm_client import (
     get_text_content, assistant_message, tool_result_message,
 )
 from multi_agent.mcp_client import MCPClient
-from multi_agent.prompts import EXECUTOR_PICK_PROMPT, EXECUTOR_PLACE_PROMPT
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# Executor tools — no nav2, manipulation only
-EXECUTOR_TOOLS = [
+_SKILL_FILE = Path(__file__).parent / "skills" / "pick_and_place.md"
+
+PICK_AND_PLACE_TOOLS = {
     "perception__segment_objects",
     "perception__get_grasp_from_pointcloud",
     "moveit__plan_and_execute",
-    "moveit__plan_to_named_state",
     "moveit__get_current_pose",
-    "moveit__remove_collision_object",
     "moveit__clear_planning_scene",
     "ros__call_service",
     "ros__send_action_goal",
     "ros__publish_once",
-]
+    "ros__subscribe_once",
+}
 
 
 def _filter_tools(all_tools: list[dict]) -> list[dict]:
-    """Filter to only the tools the executor needs."""
-    return [t for t in all_tools if t["function"]["name"] in EXECUTOR_TOOLS]
+    """Filter to only the tools the pick-and-place agent needs."""
+    return [t for t in all_tools if t["function"]["name"] in PICK_AND_PLACE_TOOLS]
 
 
 async def execute_pick_and_place(
@@ -38,7 +38,7 @@ async def execute_pick_and_place(
     model: str = None,
     max_tool_calls: int = 30,
 ) -> dict:
-    """Run an executor agent to pick or place an object.
+    """Run a pick-and-place agent to pick or place an object.
 
     Args:
         mcp: Connected MCPClient instance.
@@ -54,12 +54,13 @@ async def execute_pick_and_place(
     all_tools = mcp.get_tools()
     tools = _filter_tools(all_tools)
 
+    system_prompt = _SKILL_FILE.read_text()
+
     if mode == "pick":
-        system_prompt = EXECUTOR_PICK_PROMPT
-        user_message = f"Pick up the object '{object_name}'."
+        user_message = f"Mode: PICK\nPick up the object '{object_name}'."
     else:
-        system_prompt = EXECUTOR_PLACE_PROMPT
         user_message = (
+            f"Mode: PLACE\n"
             f"Place the currently held object on the surface in front of you. "
             f"The surface height is approximately {surface_height}m."
         )
@@ -70,7 +71,7 @@ async def execute_pick_and_place(
     ]
     tool_call_count = 0
 
-    logger.info(f"Executor started ({mode}): '{object_name}'")
+    logger.info(f"Pick-and-place started ({mode}): '{object_name}'")
 
     while tool_call_count < max_tool_calls:
         response = call_llm(messages=messages, tools=tools, model=model)
@@ -100,7 +101,7 @@ async def execute_pick_and_place(
 
         elif is_done(response):
             final_text = get_text_content(response)
-            logger.info(f"Executor finished: {final_text[:200]}")
+            logger.info(f"Pick-and-place finished: {final_text[:200]}")
 
             success = final_text.upper().startswith("SUCCESS")
             return {
@@ -117,7 +118,7 @@ async def execute_pick_and_place(
                 "tool_calls_used": tool_call_count,
             }
 
-    logger.warning(f"Executor hit max tool calls ({max_tool_calls})")
+    logger.warning(f"Pick-and-place hit max tool calls ({max_tool_calls})")
     return {
         "success": False,
         "reason": f"Exceeded maximum tool calls ({max_tool_calls})",
