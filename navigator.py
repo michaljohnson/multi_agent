@@ -131,10 +131,67 @@ async def _spin_search(
     return False, None, tool_calls
 
 
+async def _approach_forward(
+    mcp: MCPClient,
+    target_object: str,
+    max_steps: int = 3,
+    step_distance: float = 0.3,
+) -> int:
+    """Drive forward in small steps toward the object the robot is facing.
+
+    After spin-search found the object, the robot is already facing it.
+    Drive forward step_distance at a time, checking describe_scene after
+    each step to confirm the object is still visible (getting closer).
+
+    Uses /amcl_pose for current position (get_robot_pose is stale).
+
+    Returns tool_calls_used.
+    """
+    import math
+    tool_calls = 0
+
+    for step in range(max_steps):
+        # Get current pose
+        try:
+            pose_raw = await mcp.call_tool_prefixed(
+                "ros__subscribe_once",
+                {"topic": "/amcl_pose", "msg_type": "geometry_msgs/msg/PoseWithCovarianceStamped", "timeout": 3},
+            )
+            tool_calls += 1
+            pose_data = json.loads(pose_raw) if isinstance(pose_raw, str) else pose_raw
+            if "msg" in pose_data:
+                pose_data = pose_data["msg"]
+            pos = pose_data["pose"]["pose"]["position"]
+            ori = pose_data["pose"]["pose"]["orientation"]
+            siny = 2.0 * (ori["w"] * ori["z"] + ori["x"] * ori["y"])
+            cosy = 1.0 - 2.0 * (ori["y"] ** 2 + ori["z"] ** 2)
+            yaw = math.atan2(siny, cosy)
+
+            target_x = pos["x"] + step_distance * math.cos(yaw)
+            target_y = pos["y"] + step_distance * math.sin(yaw)
+
+            logger.info(
+                f"  [approach {step+1}/{max_steps}] driving {step_distance}m forward: "
+                f"({pos['x']:.2f}, {pos['y']:.2f}) → ({target_x:.2f}, {target_y:.2f})"
+            )
+            await mcp.call_tool_prefixed(
+                "nav2__navigate_to_pose",
+                {"x": round(target_x, 2), "y": round(target_y, 2), "yaw": round(yaw, 2)},
+            )
+            tool_calls += 1
+        except Exception as e:
+            logger.error(f"  [approach] step {step+1} failed: {e}")
+            tool_calls += 1
+            break
+
+    return tool_calls
+
+
 async def _try_spin_search(
     mcp: MCPClient, target_object: str | None, result: dict
 ) -> dict:
-    """If LLM failed but target_object is set, try deterministic spin-search."""
+    """If LLM failed but target_object is set, try deterministic spin-search.
+    If found, drive forward to get closer."""
     if not target_object or result["success"]:
         return result
 
@@ -143,9 +200,13 @@ async def _try_spin_search(
     result["tool_calls_used"] += spin_calls
 
     if found:
+        # Drive forward toward the object (robot is facing it after spin)
+        logger.info(f"  Found '{target_object}' — approaching with forward steps")
+        approach_calls = await _approach_forward(mcp, target_object)
+        result["tool_calls_used"] += approach_calls
         result["success"] = True
         result["reason"] = (
-            f"Found '{target_object}' after spin-search. "
+            f"Found '{target_object}' after spin-search and approached it. "
             f"Scene: {scene_text[:500] if scene_text else 'N/A'}"
         )
     return result
