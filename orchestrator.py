@@ -6,7 +6,8 @@ from multi_agent.llm_client import (
     get_text_content, assistant_message, tool_result_message,
 )
 from multi_agent.mcp_client import MCPClient
-from multi_agent.pick_and_place import execute_pick_and_place
+from multi_agent.pick import execute_pick
+from multi_agent.place import execute_place
 from multi_agent.navigator import execute_navigate
 from pathlib import Path
 
@@ -68,23 +69,24 @@ ORCHESTRATOR_TOOLS = [
         "function": {
             "name": "place",
             "description": (
-                "Place the currently held object on the surface in front of "
-                "the robot. The robot must already be near the target surface. "
-                "Spawns a pick-and-place agent that lowers the object, "
-                "releases, and retracts."
+                "Place the currently held object onto / into a target "
+                "container or surface. The robot must already be near the "
+                "target (call navigate first). Spawns a place agent that "
+                "segments the target on the front camera, computes its "
+                "centroid, lowers the object above it, releases, and retracts."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "surface_height": {
-                        "type": "number",
+                    "target_container": {
+                        "type": "string",
                         "description": (
-                            "Height of the target surface in meters "
-                            "(e.g. 0.45 for coffee table, 0.75 for dining table)."
+                            "Natural-language name of the drop target "
+                            "(e.g. 'basket', 'cardboard box', 'kitchen table')."
                         ),
                     },
                 },
-                "required": ["surface_height"],
+                "required": ["target_container"],
             },
         },
     },
@@ -108,20 +110,17 @@ async def _handle_tool_call(
         return json.dumps(result)
 
     elif tool_name == "pick":
-        result = await execute_pick_and_place(
+        result = await execute_pick(
             mcp=mcp,
             object_name=tool_input["object_name"],
-            mode="pick",
             model=executor_model,
         )
         return json.dumps(result)
 
     elif tool_name == "place":
-        result = await execute_pick_and_place(
+        result = await execute_place(
             mcp=mcp,
-            object_name="held object",
-            mode="place",
-            surface_height=tool_input["surface_height"],
+            target_container=tool_input["target_container"],
             model=executor_model,
         )
         return json.dumps(result)

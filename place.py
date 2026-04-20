@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 
 from multi_agent.llm_client import (
     call_llm, wants_tool_use, is_done, get_tool_calls,
@@ -10,9 +11,9 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-_SKILL_FILE = Path(__file__).parent / "skills" / "pick_and_place.md"
+_SKILL_FILE = Path(__file__).parent / "skills" / "place.md"
 
-PICK_AND_PLACE_TOOLS = {
+PLACE_TOOLS = {
     "perception__segment_objects",
     "perception__get_grasp_from_pointcloud",
     "moveit__plan_and_execute",
@@ -21,31 +22,30 @@ PICK_AND_PLACE_TOOLS = {
     "ros__call_service",
     "ros__send_action_goal",
     "ros__publish_once",
-    "ros__subscribe_once",
-    "nav2__navigate_to_pose",
 }
 
 
 def _filter_tools(all_tools: list[dict]) -> list[dict]:
-    """Filter to only the tools the pick-and-place agent needs."""
-    return [t for t in all_tools if t["function"]["name"] in PICK_AND_PLACE_TOOLS]
+    return [t for t in all_tools if t["function"]["name"] in PLACE_TOOLS]
 
 
-async def execute_pick_and_place(
+async def execute_place(
     mcp: MCPClient,
-    object_name: str,
-    mode: str = "pick",
-    surface_height: float = 0.80,
+    target_container: str,
     model: str = None,
-    max_tool_calls: int = 30,
+    max_tool_calls: int = 25,
 ) -> dict:
-    """Run a pick-and-place agent to pick or place an object.
+    """Run a place agent to drop the held object into / onto a target.
+
+    The robot must already be positioned near the target container (the
+    orchestrator/navigator hands off). The agent segments the target with
+    the front camera (arm camera is occluded by the held object),
+    computes the centroid, and releases the object above it.
 
     Args:
         mcp: Connected MCPClient instance.
-        object_name: Name of the object to pick (e.g. "scissors").
-        mode: "pick" to pick up an object, "place" to place the held object.
-        surface_height: Height of the target surface (used in place mode).
+        target_container: Natural-language name of the drop target
+            (e.g. "basket", "box", "kitchen table").
         model: LiteLLM model string. Defaults to LLM_MODEL env var.
         max_tool_calls: Safety cap on tool calls to prevent runaway.
 
@@ -56,15 +56,10 @@ async def execute_pick_and_place(
     tools = _filter_tools(all_tools)
 
     system_prompt = _SKILL_FILE.read_text()
-
-    if mode == "pick":
-        user_message = f"Mode: PICK\nPick up the object '{object_name}'."
-    else:
-        user_message = (
-            f"Mode: PLACE\n"
-            f"Place the currently held object on the surface in front of you. "
-            f"The surface height is approximately {surface_height}m."
-        )
+    user_message = (
+        f"Place the currently held object on/into the '{target_container}' "
+        f"in front of you."
+    )
 
     messages = [
         {"role": "system", "content": system_prompt},
@@ -72,7 +67,7 @@ async def execute_pick_and_place(
     ]
     tool_call_count = 0
 
-    logger.info(f"Pick-and-place started ({mode}): '{object_name}'")
+    logger.info(f"Place started: target='{target_container}'")
 
     while tool_call_count < max_tool_calls:
         response = call_llm(messages=messages, tools=tools, model=model)
@@ -102,9 +97,14 @@ async def execute_pick_and_place(
 
         elif is_done(response):
             final_text = get_text_content(response)
-            logger.info(f"Pick-and-place finished: {final_text[:200]}")
+            logger.info(f"Place finished: {final_text[:200]}")
 
-            success = final_text.upper().startswith("SUCCESS")
+            # Find last standalone SUCCESS/FAILURE; whichever appears later wins
+            s_matches = list(re.finditer(r'\bSUCCESS\b', final_text, re.IGNORECASE))
+            f_matches = list(re.finditer(r'\bFAILURE\b', final_text, re.IGNORECASE))
+            last_s = s_matches[-1].start() if s_matches else -1
+            last_f = f_matches[-1].start() if f_matches else -1
+            success = last_s > last_f
             return {
                 "success": success,
                 "reason": final_text,
@@ -119,7 +119,7 @@ async def execute_pick_and_place(
                 "tool_calls_used": tool_call_count,
             }
 
-    logger.warning(f"Pick-and-place hit max tool calls ({max_tool_calls})")
+    logger.warning(f"Place hit max tool calls ({max_tool_calls})")
     return {
         "success": False,
         "reason": f"Exceeded maximum tool calls ({max_tool_calls})",

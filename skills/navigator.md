@@ -19,10 +19,10 @@ NOT as exact approach poses:
 - **Living room** (~x=2.6, y=0.6): white couch/sofa, wooden coffee table
   (~0.45m high) on a grey carpet, wooden shelves, TV area, framed pictures.
 
-- **Kitchen/dining area** (~x=5.5, y=-0.3): wooden dining table (~0.75m high)
+- **Kitchen/dining area** (~x=3.5, y=-0.9, yaw=0.5): wooden dining table (~0.75m high)
   with navy blue chairs, large fridge, range hood, white kitchen counters.
 
-- **Bedroom** (~x=-2.7, y=0.1): bed, nightstands.
+- **Bedroom** (~x=-2.49, y=0.06, yaw=3.09 rad): bed, nightstands. Yaw faces -x toward the bed.
 
 - **Hallway/kids area** (~x=-3.4, y=-1.8): toys, balls, scattered objects
   on floor.
@@ -36,7 +36,7 @@ re-navigate if needed.
 ## Procedure
 
 1. **Tuck arm** — moveit__plan_and_execute with group="arm",
-   target_type="named_state", target={"state_name":"forward_looking"}.
+   target_type="named_state", target={"state_name":"look_forward"}.
    If the named state fails, use joint values instead:
    target_type="joint_state",
    target={"joint_positions":[-0.0001, -0.2429, -2.8291, -0.7983, 1.5622, 0.0]}.
@@ -47,13 +47,17 @@ re-navigate if needed.
    Do NOT call describe_scene first to "orient yourself" — just navigate.
 
 3. **Verify area** — perception__describe_scene after arriving.
-   If target_object is visible → report SUCCESS immediately.
-   Check if the scene matches the destination landmarks (e.g. kitchen =
-   fridge, dining table, counters).
-   If the area is correct but the target object is not visible → report
-   FAILURE. The system handles searching automatically.
-   If the area is clearly wrong → try ONE more navigation, then report
-   FAILURE.
+   Use describe_scene to identify the **room/area** (kitchen = fridge,
+   dining table, counters; living room = couch, coffee table; etc.).
+   Do NOT rely on describe_scene to locate small target objects — Claude
+   Vision often misses small items on the floor. If describe_scene happens
+   to mention the target, great, report SUCCESS; if not, that's fine too
+   — the deterministic post-step uses SAM3 on the front camera to find
+   and approach the target precisely.
+   Decision rule:
+   - Area clearly matches the destination → report SUCCESS (even if the
+     target isn't mentioned; SAM3 will find it).
+   - Area is wrong → try ONE more navigation, then report FAILURE.
 
 5. **Report** — evaluate and decide:
    - If target_object was specified and visible: SUCCESS.
@@ -70,6 +74,26 @@ re-navigate if needed.
 
 ---
 
+## Front-camera object localization
+
+The front camera (always on, regardless of arm pose) runs SAM3 segmentation
+independently of the arm camera. Two tools are available:
+
+- `perception__segment_objects(prompt, camera="front")` — segment the named
+  object from the front camera. Returns SUCCESS or NO_OBJECTS_FOUND.
+- `perception__get_grasp_from_pointcloud(object_name)` — returns the cached
+  object's `centroid_base_frame` (x, y, z in base_footprint, where x is the
+  forward distance from the robot). Works on whichever camera segmented last.
+
+A deterministic post-step automatically runs after you report SUCCESS: it
+segments the target on the front camera and nudges the robot forward so the
+target ends up at ~1.0m standoff. You do NOT need to call these tools
+yourself — rely on describe_scene for verification, and let the post-step
+handle the approach. Calling them manually is only useful if you need to
+reason about object position before deciding where to drive.
+
+---
+
 ## Retry rules
 
 - If nav2 fails or times out: call nav2__clear_costmaps ONCE, then retry the
@@ -82,14 +106,16 @@ re-navigate if needed.
 
 ## Critical rules
 
-- ALWAYS move arm to forward_looking BEFORE navigating. This is mandatory.
+- ALWAYS move arm to look_forward BEFORE navigating. This is mandatory.
 - Navigation poses are in the MAP frame (not base_footprint).
 - The yaw is in radians: 0=east, pi/2=north, pi=west, 3pi/2=south.
 - get_robot_pose may return stale data — trust that navigation moves happened.
-- When approaching a surface, stop 0.4-0.6m away from it.
+- A deterministic post-step refines your standoff to ~1.0m using front-camera
+  segmentation after you report SUCCESS, so don't worry about the exact
+  distance to the surface — roughly-right is fine.
 - Do NOT try to spin or rotate to search for objects. If you confirmed the
   right area but cannot see the target object, just report FAILURE. The
-  system handles searching automatically.
+  system handles searching (and the front-camera approach) automatically.
 - Accept plausible matches — the vision model will rarely produce a perfect
   match. If the scene is consistent with the destination, report SUCCESS.
 - Do NOT skip writing the Check 1 / Check 2 reasoning block.

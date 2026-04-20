@@ -14,7 +14,8 @@ import logging
 import os
 
 from multi_agent.mcp_client import MCPClient
-from multi_agent.pick_and_place import execute_pick_and_place
+from multi_agent.pick import execute_pick
+from multi_agent.place import execute_place
 from multi_agent.orchestrator import run_orchestrator
 
 # === CONFIGURATION ===
@@ -44,13 +45,30 @@ async def test_pick(object_name: str):
     print(f"\n=== Testing pick executor: '{object_name}' ===\n")
 
     async with MCPClient() as mcp:
-        result = await execute_pick_and_place(
+        result = await execute_pick(
             mcp=mcp,
             object_name=object_name,
-            mode="pick",
             model=EXECUTOR_MODEL,
         )
         print(f"\n=== Pick Result ===")
+        print(json.dumps(result, indent=2))
+
+
+async def test_place(target_container: str):
+    """Test place executor on a single target (no orchestrator/navigator).
+
+    Assumes the robot is already holding an object and positioned near
+    the drop target.
+    """
+    print(f"\n=== Testing place executor: target='{target_container}' ===\n")
+
+    async with MCPClient() as mcp:
+        result = await execute_place(
+            mcp=mcp,
+            target_container=target_container,
+            model=EXECUTOR_MODEL,
+        )
+        print(f"\n=== Place Result ===")
         print(json.dumps(result, indent=2))
 
 
@@ -110,6 +128,13 @@ def main():
         help="Test single pick of OBJECT (no orchestrator/navigator)",
     )
     parser.add_argument(
+        "--test-place",
+        type=str,
+        metavar="CONTAINER",
+        default=None,
+        help="Test single place into CONTAINER (no orchestrator/navigator). Robot must already be holding an object.",
+    )
+    parser.add_argument(
         "--test-navigator",
         type=str,
         nargs="+",
@@ -141,6 +166,8 @@ def main():
 
     if args.test_pick:
         asyncio.run(test_pick(args.test_pick))
+    elif args.test_place:
+        asyncio.run(test_place(args.test_place))
     elif args.test_navigator:
         dest = " ".join(args.test_navigator)
         asyncio.run(test_navigator(dest, args.target_object))
