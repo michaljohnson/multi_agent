@@ -22,6 +22,7 @@ PICK_AND_PLACE_TOOLS = {
     "ros__send_action_goal",
     "ros__publish_once",
     "ros__subscribe_once",
+    "nav2__navigate_to_pose",
 }
 
 
