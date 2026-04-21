@@ -18,20 +18,24 @@ the held object above it, release, and retract.
    FRONT (chassis) camera, NOT the arm camera — the held object occludes
    the arm camera's view.
 
-3. **Get target centroid** — `perception__get_grasp_from_pointcloud` with
-   `object_name="<target_container>"`. Returns a pose in `base_footprint`
-   frame. The returned z is roughly the rim / top surface of the target
-   (the pointcloud captures the visible upper surface). Same call works
-   for table tops and bin rims.
+3. **Compute the bin-opening drop pose** —
+   `perception__get_container_drop_pose` with
+   `object_name="<target_container>"`. Returns `drop_pose` (pose at the
+   rim top in `base_footprint`) and `rim_center_base_frame`. This tool
+   filters the pointcloud to the top rim slice and returns the rim's
+   geometric center (bounding-box midpoint), not the raw mean — so the
+   drop lands in the opening even when only part of the rim is visible.
+   Use this INSTEAD of `get_grasp_from_pointcloud`.
 
-4. **Drop pose — go HIGH above the target and release from there.**
-   `moveit__plan_and_execute` with `group="arm"`, `target_type="pose"`,
-   `target={"position":[centroid_x, centroid_y, centroid_z + 0.35], "orientation":[1,0,0,0], "frame_id":"base_footprint"}`.
+4. **Drop pose — go HIGH above the rim and release from there.**
+   Take `rim_center_base_frame = {x: rx, y: ry, z: rz}` from step 3 and
+   call `moveit__plan_and_execute` with `group="arm"`,
+   `target_type="pose"`,
+   `target={"position":[rx, ry, rz + 0.35], "orientation":[1,0,0,0], "frame_id":"base_footprint"}`.
    Stay 35cm above the rim — do NOT descend closer. The object is
    released from this height and falls into the container. This avoids
    any risk of the gripper or held object grazing the rim/walls during
-   descent. A wider-mouth container (drainer, low-wall bin) catches the
-   object reliably from this drop height.
+   descent.
 
 5. **Force-detach** — `ros__publish_once` with
    `topic="/gripper/force_detach_str"`, `msg_type="std_msgs/msg/String"`,
@@ -58,17 +62,17 @@ the held object above it, release, and retract.
   wide-mouth container with the 10cm drop clearance.
 - FRAME: Always use `base_footprint`, NEVER `odom` or `map`.
 - ORIENTATION: Always use quaternion `[1,0,0,0]` for top-down approach (w,x,y,z).
-- Do NOT call `get_grasp_from_pointcloud` a second time after moving the
-  arm — the cached pointcloud goes stale. Reuse the centroid from the
-  first call.
+- Do NOT call `get_container_drop_pose` or `segment_objects` a second
+  time after moving the arm — the cached pointcloud goes stale. Reuse
+  the rim center from the first call.
 - If `plan_and_execute` reports "failed", call `moveit__get_current_pose`
   to check whether the arm actually moved (the sim runs slow and
   sometimes reports false failures).
 - If planning fails twice from the same state: call
   `moveit__clear_planning_scene`, then `moveit__plan_and_execute` to
   named_state `"look_forward"`, then retry.
-- DO NOT hardcode drop coordinates. Always use the centroid from
-  `get_grasp_from_pointcloud`. A hardcoded fallback defeats the whole
+- DO NOT hardcode drop coordinates. Always use the rim center from
+  `get_container_drop_pose`. A hardcoded fallback defeats the whole
   purpose of perception-driven placement.
 - Report FAILURE honestly. Do NOT report SUCCESS unless the object was
   actually released near the segmented target. A false success is worse

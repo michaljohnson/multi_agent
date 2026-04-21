@@ -15,7 +15,7 @@ _SKILL_FILE = Path(__file__).parent / "skills" / "place.md"
 
 PLACE_TOOLS = {
     "perception__segment_objects",
-    "perception__get_grasp_from_pointcloud",
+    "perception__get_container_drop_pose",
     "moveit__plan_and_execute",
     "moveit__get_current_pose",
     "moveit__clear_planning_scene",
