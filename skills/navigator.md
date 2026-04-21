@@ -16,7 +16,7 @@ The robot operates in an open-plan apartment. Approximate area centers
 (map frame) and landmarks — use these to pick a navigation direction,
 NOT as exact approach poses:
 
-- **Living room** (~x=2.6, y=0.6): white couch/sofa, wooden coffee table
+- **Living room/wooden coffee table** (~x=1.8, y=1.04, yaw=-1.7): white couch/sofa, wooden coffee table
   (~0.45m high) on a grey carpet, wooden shelves, TV area, framed pictures.
 
 - **Kitchen/dining area** (~x=3.5, y=-0.9, yaw=0.5): wooden dining table (~0.75m high)
