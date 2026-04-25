@@ -21,6 +21,12 @@ DEFAULT_MODEL = os.environ.get("LLM_MODEL", "anthropic/claude-sonnet-4-20250514"
 # Suppress litellm's verbose logging
 litellm.suppress_debug_info = True
 
+# Allow tool-call blocks in message history even when `tools=None` on a call.
+# Without this, LiteLLM refuses to transform a conversation that already has
+# assistant tool_calls + tool results if the current turn has no tool schemas.
+# Relevant for replay/inspection turns (e.g. the look plumbing test).
+litellm.modify_params = True
+
 
 def call_llm(messages, tools=None, model=None, max_tokens=4096, max_retries=3):
     """Call an LLM via LiteLLM with retry on rate-limit errors.
@@ -89,7 +95,13 @@ def assistant_message(response):
 
 
 def tool_result_message(tool_call_id, content):
-    """Format a tool result message (OpenAI format)."""
+    """Format a tool result message (OpenAI format).
+
+    `content` may be either a string (normal case) or a list of OpenAI-format
+    content blocks (e.g. `[{"type": "text", ...}, {"type": "image_url", ...}]`)
+    for tools that return images. LiteLLM forwards list content to the
+    provider's native multi-modal tool-result format.
+    """
     return {
         "role": "tool",
         "tool_call_id": tool_call_id,

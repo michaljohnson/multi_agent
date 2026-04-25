@@ -21,6 +21,12 @@ SERVER_SHORT_NAMES = {
     "perception-mcp-server": "perception",
 }
 
+# Camera topics used by MCPClient.look() for visual reasoning in agents.
+CAMERA_TOPICS = {
+    "front": "/front_rgbd_camera/color/image_raw/compressed",
+    "arm": "/arm_camera/color/image_raw/compressed",
+}
+
 
 class MCPClient:
     """Manages connections to all MCP servers and provides unified tool access."""
@@ -77,6 +83,78 @@ class MCPClient:
             else:
                 parts.append(str(block))
         return "\n".join(parts)
+
+    async def call_tool_raw(
+        self, server_name: str, tool_name: str, args: dict
+    ) -> list[dict]:
+        """Call a tool and return content as a list of OpenAI-format blocks
+        (text + image_url), so images survive into the LLM's tool result.
+
+        Use this for camera / image tools. Other callers should stick to
+        `call_tool()` which flattens to a string.
+        """
+        session = self._sessions[server_name]
+        result = await session.call_tool(
+            tool_name, args, read_timeout_seconds=timedelta(seconds=120)
+        )
+        blocks: list[dict] = []
+        for block in result.content:
+            btype = getattr(block, "type", None)
+            if btype == "image":
+                mime = getattr(block, "mimeType", "image/jpeg")
+                data = getattr(block, "data", "")
+                blocks.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime};base64,{data}"},
+                })
+            elif hasattr(block, "text"):
+                blocks.append({"type": "text", "text": block.text})
+            else:
+                blocks.append({"type": "text", "text": str(block)})
+        return blocks
+
+    async def call_tool_prefixed_raw(
+        self, prefixed_name: str, args: dict
+    ) -> list[dict]:
+        """Prefixed-name variant of `call_tool_raw()`."""
+        server_name, tool_name = self.route_tool_call(prefixed_name)
+        return await self.call_tool_raw(server_name, tool_name, args)
+
+    async def look(self, camera: str = "front") -> list[dict]:
+        """Return camera frame(s) as tool-result content blocks
+        (text label + image_url block per camera). Shared primitive used
+        by the orchestrator and navigator for visual ground-truth reasoning.
+
+        camera="both" returns front + arm back-to-back in one result so
+        the LLM sees chassis + wrist views together — useful for area
+        judgments where each angle complements the other.
+
+        Raises ValueError for an unknown camera name.
+        """
+        if camera == "both":
+            names = ["front", "arm"]
+        elif camera in CAMERA_TOPICS:
+            names = [camera]
+        else:
+            raise ValueError(
+                f"Invalid camera {camera!r}: choose from "
+                f"{sorted(CAMERA_TOPICS) + ['both']}"
+            )
+
+        blocks: list[dict] = []
+        for name in names:
+            frame = await self.call_tool_prefixed_raw(
+                "ros__subscribe_once",
+                {
+                    "topic": CAMERA_TOPICS[name],
+                    "msg_type": "sensor_msgs/msg/CompressedImage",
+                    "expects_image": "true",
+                    "timeout": 3.0,
+                },
+            )
+            blocks.append({"type": "text", "text": f"{name} camera image:"})
+            blocks.extend(frame)
+        return blocks
 
     def route_tool_call(self, prefixed_name: str) -> tuple[str, str]:
         """Route a prefixed tool name to (server_name, tool_name).
