@@ -46,11 +46,18 @@ navigator handed off). Your job is to grasp it and lift it.
 8. **Close gripper** — `ros__send_action_goal` with
    `goal={"command":{"position":0.7,"max_effort":50.0}}`.
 
-9. **Verify grasp** — `ros__subscribe_once` on `topic="/gripper/status"`,
-   `msg_type="std_msgs/msg/String"`, `timeout=3.0`. Check the `data` field:
-   - Starts with `"attached:"` → grasp SUCCEEDED, proceed to lift.
-   - Says `"detached"` → grasp FAILED, report FAILURE.
-   - Timeout (no message) → proceed to lift and assume success.
+9. **Verify grasp — THIS is the success gate.** `ros__subscribe_once` on
+   `topic="/gripper/status"`, `msg_type="std_msgs/msg/String"`,
+   `timeout=3.0`. Check the `data` field:
+   - `"attached:<model_name>"` where `<model_name>` matches the target
+     object → grasp SUCCEEDED. Proceed to lift, then report SUCCESS at
+     the end. **This signal is ground truth** — it comes directly from
+     gripper_attach_node which interfaces with Gazebo's physics. Trust it.
+   - `"detached"` or `"attached:<wrong_name>"` → grasp FAILED, report
+     FAILURE.
+   - Timeout (no message) → re-subscribe ONCE with `timeout=5.0`. If
+     still no message, treat as FAILURE (the attach node should be
+     publishing continuously when the gripper is closed).
 
 10. **Lift** — `moveit__plan_and_execute` to `[x, y, grasp_z + 0.20]`.
 
@@ -60,13 +67,13 @@ navigator handed off). Your job is to grasp it and lift it.
     `target_type="joint_state"`,
     `target={"joint_positions":[-0.0001, -0.2429, -2.8291, -0.7983, 1.5622, 0.0]}`.
 
-12. **Self-verify attach before reporting SUCCESS** —
-    `moveit__list_collision_objects`. Confirm an attached object is present
-    on the gripper (look for an entry in the attached / attached_collision
-    list with a non-empty `link_name` on the gripper). If none is attached,
-    report FAILURE — do NOT report SUCCESS based on `/gripper/status` alone.
-    `/gripper/status` can lag or be stale; the attach state in MoveIt is
-    the authoritative gripper-holding signal for the sub-agent.
+12. **Report SUCCESS** based on the step 9 result. Do NOT call
+    `moveit__list_collision_objects` to second-guess the gripper status —
+    MoveIt's planning scene is only populated by explicit
+    `attach_collision_object` calls (which this procedure does not make),
+    so its attached-objects list is unrelated to actual grasp state and
+    will mislead you. The orchestrator does an independent visual check
+    via the front camera; that is the second signal, not MoveIt.
 
 ## Critical rules
 
@@ -91,9 +98,15 @@ navigator handed off). Your job is to grasp it and lift it.
   reach a far target. Use `creep_closer` instead.
 - Report FAILURE honestly. Do NOT report SUCCESS unless the object was
   actually grasped and lifted. A false success is worse than a failure.
-- SUCCESS must be gated on step 12 (MoveIt attach check). Motion
-  completing is not enough — the gripper has to actually be holding
-  something for the pick to have succeeded.
+- SUCCESS must be gated on step 9 (`/gripper/status` says
+  `attached:<target_object>`). Motion completing is not enough — the
+  gripper has to actually be holding the *right* object for the pick
+  to have succeeded.
+- Do NOT remove the target object from the planning scene with
+  `remove_collision_object` after picking it up — there isn't one to
+  remove (the skill does not add it). Keep the planning scene calls
+  to `clear_planning_scene` only, used as recovery from planning
+  failures.
 
 ## Reporting
 
