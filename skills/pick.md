@@ -60,6 +60,14 @@ navigator handed off). Your job is to grasp it and lift it.
     `target_type="joint_state"`,
     `target={"joint_positions":[-0.0001, -0.2429, -2.8291, -0.7983, 1.5622, 0.0]}`.
 
+12. **Self-verify attach before reporting SUCCESS** —
+    `moveit__list_collision_objects`. Confirm an attached object is present
+    on the gripper (look for an entry in the attached / attached_collision
+    list with a non-empty `link_name` on the gripper). If none is attached,
+    report FAILURE — do NOT report SUCCESS based on `/gripper/status` alone.
+    `/gripper/status` can lag or be stale; the attach state in MoveIt is
+    the authoritative gripper-holding signal for the sub-agent.
+
 ## Critical rules
 
 - CAMERA: Always pass `camera="arm"` to `perception__segment_objects`.
@@ -83,6 +91,9 @@ navigator handed off). Your job is to grasp it and lift it.
   reach a far target. Use `creep_closer` instead.
 - Report FAILURE honestly. Do NOT report SUCCESS unless the object was
   actually grasped and lifted. A false success is worse than a failure.
+- SUCCESS must be gated on step 12 (MoveIt attach check). Motion
+  completing is not enough — the gripper has to actually be holding
+  something for the pick to have succeeded.
 
 ## Reporting
 
