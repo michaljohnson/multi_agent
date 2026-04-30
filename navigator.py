@@ -16,78 +16,17 @@ logger = logging.getLogger(__name__)
 _SKILL_FILE = Path(__file__).parent / "skills" / "navigator.md"
 
 NAVIGATOR_TOOLS = {
-    "nav2__navigate_to_pose",
-    "nav2__get_robot_pose",
-    "nav2__clear_costmaps",
-    "nav2__cancel_navigation",
-    "perception__describe_scene",
-    "perception__segment_objects",
-    "perception__get_grasp_from_pointcloud",
     "moveit__plan_and_execute",
+    "nav2__navigate_to_pose",
+    "nav2__clear_costmaps",
+    "nav2__get_robot_pose",
+    "perception__look",
 }
 
 
 def _filter_tools(all_tools: list[dict]) -> list[dict]:
     """Filter to only the tools the navigator needs."""
     return [t for t in all_tools if t["function"]["name"] in NAVIGATOR_TOOLS]
-
-
-_STOP_WORDS = {"the", "a", "an", "on", "in", "at", "of", "from", "near", "by", "to", "is", "it"}
-
-
-def _object_in_scene(target: str, scene_text: str) -> bool:
-    """Check if target object appears in describe_scene result.
-
-    Parses the JSON to extract the 'objects' list and 'description',
-    then uses difflib to fuzzy-match target words against each listed
-    object. This avoids false positives from common English words in
-    free text (e.g. 'can' as a verb).
-    """
-    from difflib import SequenceMatcher
-
-    target_words = [w for w in target.lower().split() if w not in _STOP_WORDS]
-    if not target_words:
-        return False
-
-    # Try to parse as JSON to get the objects list
-    objects_list = []
-    description = ""
-    try:
-        data = json.loads(scene_text) if isinstance(scene_text, str) else scene_text
-        objects_list = data.get("objects", [])
-        description = data.get("description", "")
-    except (json.JSONDecodeError, TypeError):
-        description = str(scene_text).lower()
-
-    # Check each object in the structured list
-    for obj in objects_list:
-        obj_lower = str(obj).lower()
-        obj_words = obj_lower.replace("_", " ").replace("/", " ").split()
-        # Count how many target words have a good fuzzy match in this object
-        matched = 0
-        for tw in target_words:
-            for ow in obj_words:
-                ratio = SequenceMatcher(None, tw, ow).ratio()
-                if ratio >= 0.7:  # 70% similarity
-                    matched += 1
-                    break
-        if matched >= max(2, len(target_words) // 2):
-            logger.info(f"  object match: '{obj}' matched {matched}/{len(target_words)} target words")
-            return True
-
-    # Fallback: check description for color + object type pattern
-    desc_lower = description.lower()
-    color_words = [w for w in target_words if w in {"red", "blue", "green", "black", "white", "yellow", "orange", "brown", "pink", "grey", "gray"}]
-    if color_words and any(cw in desc_lower for cw in color_words):
-        # Found the color — check if there's also an object-like word nearby
-        object_words = [w for w in target_words if w not in _STOP_WORDS and w not in color_words and len(w) > 2]
-        for ow in object_words:
-            if ow in desc_lower:
-                logger.info(f"  object match: color '{color_words}' + '{ow}' found in description")
-                return True
-
-    logger.info(f"  object match: no match for '{target}' in {len(objects_list)} objects")
-    return False
 
 
 async def _wait_until_still(
@@ -144,7 +83,8 @@ async def _spin_search(
     Spins the robot ~60° at a time and calls SAM3 segmentation on the front
     camera after each spin. SAM3 returns SUCCESS when it actually finds the
     object (pixel-precise), so no fuzzy text matching is needed. On success,
-    the pointcloud is already cached and ready for _segment_and_approach_front.
+    control returns to the verify gate; pick/place owns the drive-closer
+    step from there.
 
     Returns:
         (found, last_detection_info, tool_calls_used)
@@ -189,307 +129,30 @@ async def _spin_search(
     return False, None, tool_calls
 
 
-async def _approach_forward(
-    mcp: MCPClient,
-    target_object: str,
-    max_steps: int = 3,
-    step_distance: float = 0.3,
-) -> int:
-    """Drive forward in small steps toward the object the robot is facing.
-
-    After spin-search found the object, the robot is already facing it.
-    Drive forward step_distance at a time, checking describe_scene after
-    each step to confirm the object is still visible (getting closer).
-
-    Uses /amcl_pose for current position (get_robot_pose is stale).
-
-    Returns tool_calls_used.
-    """
-    import math
-    tool_calls = 0
-
-    for step in range(max_steps):
-        # Get current pose
-        try:
-            pose_raw = await mcp.call_tool_prefixed(
-                "ros__subscribe_once",
-                {"topic": "/amcl_pose", "msg_type": "geometry_msgs/msg/PoseWithCovarianceStamped", "timeout": 3},
-            )
-            tool_calls += 1
-            pose_data = json.loads(pose_raw) if isinstance(pose_raw, str) else pose_raw
-            if "msg" in pose_data:
-                pose_data = pose_data["msg"]
-            pos = pose_data["pose"]["pose"]["position"]
-            ori = pose_data["pose"]["pose"]["orientation"]
-            siny = 2.0 * (ori["w"] * ori["z"] + ori["x"] * ori["y"])
-            cosy = 1.0 - 2.0 * (ori["y"] ** 2 + ori["z"] ** 2)
-            yaw = math.atan2(siny, cosy)
-
-            target_x = pos["x"] + step_distance * math.cos(yaw)
-            target_y = pos["y"] + step_distance * math.sin(yaw)
-
-            logger.info(
-                f"  [approach {step+1}/{max_steps}] driving {step_distance}m forward: "
-                f"({pos['x']:.2f}, {pos['y']:.2f}) → ({target_x:.2f}, {target_y:.2f})"
-            )
-            await mcp.call_tool_prefixed(
-                "nav2__navigate_to_pose",
-                {"x": round(target_x, 2), "y": round(target_y, 2), "yaw": round(yaw, 2)},
-            )
-            tool_calls += 1
-        except Exception as e:
-            logger.error(f"  [approach] step {step+1} failed: {e}")
-            tool_calls += 1
-            break
-
-    return tool_calls
-
-
-async def _segment_once(
-    mcp: MCPClient, target_object: str, camera: str = "front"
-) -> tuple[float | None, float | None, int]:
-    """Run SAM3 on the named camera + grasp lookup; return (base_x, base_y, calls)."""
-    calls = 0
-    try:
-        seg_raw = await mcp.call_tool_prefixed(
-            "perception__segment_objects",
-            {"prompt": target_object, "camera": camera, "timeout": 30},
-        )
-        calls += 1
-        seg = json.loads(seg_raw) if isinstance(seg_raw, str) else seg_raw
-        if seg.get("status") != "SUCCESS":
-            logger.info(f"  [seg:{camera}] returned {seg.get('status')}")
-            return None, None, calls
-    except Exception as e:
-        logger.error(f"  [seg:{camera}] segment_objects failed: {e}")
-        return None, None, calls
-
-    try:
-        grasp_raw = await mcp.call_tool_prefixed(
-            "perception__get_grasp_from_pointcloud",
-            {"object_name": target_object},
-        )
-        calls += 1
-        grasp = json.loads(grasp_raw) if isinstance(grasp_raw, str) else grasp_raw
-        c = grasp.get("centroid_base_frame", {})
-        return float(c.get("x", 0.0)), float(c.get("y", 0.0)), calls
-    except Exception as e:
-        logger.error(f"  [seg:{camera}] get_grasp failed: {e}")
-        return None, None, calls
-
-
-async def _segment_and_approach_front(
-    mcp: MCPClient,
-    target_object: str,
-    standoff_distance: float = 1.00,
-    max_iterations: int = 2,
-    done_threshold: float = 0.20,
-    bearing_tolerance: float = 0.08,  # ~4.6° — then lateral < ~5cm at 0.55m
-) -> tuple[bool, int]:
-    """Center on the target, then drive to ``standoff_distance`` from it.
-
-    Each iteration:
-      1. Segment target on front camera.
-      2. If |bearing| > ``bearing_tolerance``, spin by bearing to center it
-         (nav2_spin_robot is more precise than packing yaw into nav2 goal).
-      3. Re-segment after the spin.
-      4. Drive to the approach point in map frame via nav2_navigate_to_pose.
-      5. Done when distance is within ``done_threshold`` of ``standoff_distance``.
-
-    Keeps rotation and translation separate so neither fights the other's
-    tolerance. Uses front camera + TF for base-frame math (AMCL-independent);
-    AMCL is only used once per hop to convert the translation target to map.
-    """
-    import math
-
-    tool_calls = 0
-    last_distance = None
-
-    for step in range(max_iterations):
-        # (1) Segment to locate the target in base_footprint (front camera only)
-        base_x, base_y, c = await _segment_once(mcp, target_object, camera="front")
-        tool_calls += c
-        if base_x is None:
-            # Front camera didn't see it. Arm-camera verify only counts if
-            # it actually sees the target. If both cameras miss, report
-            # failure and let the verify-gate spin-search handle it —
-            # never silently declare success here (that was the lenient
-            # escape that produced false positives).
-            if step > 0:
-                arm_x, arm_y, arm_c = await _segment_once(
-                    mcp, target_object, camera="arm"
-                )
-                tool_calls += arm_c
-                if arm_x is not None:
-                    arm_dist = math.hypot(arm_x, arm_y)
-                    logger.info(
-                        f"  [approach-seg {step+1}] front miss in blind spot, "
-                        f"but arm-camera verified at ({arm_x:.2f}, {arm_y:.2f}) "
-                        f"d={arm_dist:.2f}m — done"
-                    )
-                    return True, tool_calls
-                # Only accept as done if the LAST known distance was
-                # already within ~standoff (i.e., we actually arrived).
-                if last_distance is not None and last_distance <= standoff_distance + done_threshold:
-                    logger.info(
-                        f"  [approach-seg {step+1}] both cameras miss but last "
-                        f"distance {last_distance:.2f}m was within standoff; done"
-                    )
-                    return True, tool_calls
-                logger.info(
-                    f"  [approach-seg {step+1}] front+arm miss and last distance "
-                    f"{last_distance}m not within standoff — FAILURE"
-                )
-                return False, tool_calls
-            logger.info(
-                f"  [approach-seg {step+1}/{max_iterations}] target not visible"
-            )
-            return False, tool_calls
-
-        distance = math.hypot(base_x, base_y)
-        last_distance = distance
-        bearing = math.atan2(base_y, base_x)
-        logger.info(
-            f"  [approach-seg {step+1}/{max_iterations}] '{target_object}' at "
-            f"base_footprint=({base_x:.2f}, {base_y:.2f}) "
-            f"d={distance:.2f}m bearing={math.degrees(bearing):.1f}°"
-        )
-
-        # (2) Center by spinning if bearing is off
-        if abs(bearing) > bearing_tolerance:
-            logger.info(f"  [approach-seg {step+1}] spin {math.degrees(bearing):.1f}° to center")
-            try:
-                await mcp.call_tool_prefixed("nav2__spin_robot", {"angle": bearing})
-                tool_calls += 1
-            except Exception as e:
-                logger.error(f"  [approach-seg {step+1}] spin_robot failed: {e}")
-                return False, tool_calls
-
-            # Wait until robot is physically still before re-segmenting
-            await _wait_until_still(mcp)
-
-            # (3) Re-segment after spin (front camera only)
-            base_x, base_y, c = await _segment_once(mcp, target_object, camera="front")
-            tool_calls += c
-            if base_x is None:
-                logger.info(
-                    f"  [approach-seg {step+1}] target lost after centering spin"
-                )
-                # Still consider the current position usable if we got close
-                return (last_distance is not None and last_distance <= standoff_distance + 0.5), tool_calls
-            distance = math.hypot(base_x, base_y)
-            last_distance = distance
-            logger.info(
-                f"  [approach-seg {step+1}] centered: base=({base_x:.2f}, {base_y:.2f}) d={distance:.2f}m"
-            )
-
-        # Are we already at standoff?
-        if abs(distance - standoff_distance) <= done_threshold:
-            logger.info(
-                f"  [approach-seg] within {done_threshold}m of {standoff_distance}m standoff"
-            )
-            return True, tool_calls
-
-        if distance < 1e-3:
-            logger.warning("  [approach-seg] object on top of robot; aborting")
-            return False, tool_calls
-
-        # (4) Drive forward along the (now-centered) robot→object ray.
-        # Cap the per-iteration hop so we re-segment and correct heading
-        # before committing to the final approach. Long single hops
-        # compound AMCL drift + path replanning + yaw error.
-        _MAX_HOP_DISTANCE = 1.5  # metres
-        remaining = distance - standoff_distance  # >0 because checked above
-        hop = min(remaining, _MAX_HOP_DISTANCE)
-        t = hop / distance
-        approach_base_x = base_x * t
-        approach_base_y = base_y * t
-        if hop < remaining:
-            logger.info(
-                f"  [approach-seg {step+1}] long approach ({remaining:.2f}m); "
-                f"capping this hop to {hop:.2f}m and will re-segment"
-            )
-
-        # Read current AMCL pose for base→map conversion (one-shot; drift
-        # across a short hop is small)
-        try:
-            pose_raw = await mcp.call_tool_prefixed(
-                "ros__subscribe_once",
-                {
-                    "topic": "/amcl_pose",
-                    "msg_type": "geometry_msgs/msg/PoseWithCovarianceStamped",
-                    "timeout": 3,
-                },
-            )
-            tool_calls += 1
-            pose_data = json.loads(pose_raw) if isinstance(pose_raw, str) else pose_raw
-            if "msg" in pose_data:
-                pose_data = pose_data["msg"]
-            p = pose_data["pose"]["pose"]["position"]
-            o = pose_data["pose"]["pose"]["orientation"]
-            siny = 2.0 * (o["w"] * o["z"] + o["x"] * o["y"])
-            cosy = 1.0 - 2.0 * (o["y"] ** 2 + o["z"] ** 2)
-            robot_yaw = math.atan2(siny, cosy)
-            robot_x, robot_y = p["x"], p["y"]
-        except Exception as e:
-            logger.error(f"  [approach-seg {step+1}] amcl_pose failed: {e}")
-            return False, tool_calls
-
-        cos_y, sin_y = math.cos(robot_yaw), math.sin(robot_yaw)
-        map_x = robot_x + approach_base_x * cos_y - approach_base_y * sin_y
-        map_y = robot_y + approach_base_x * sin_y + approach_base_y * cos_y
-        # Goal yaw: face the ball from the goal position. nav2's yaw
-        # tolerance is loose after long drives; computing yaw from goal→ball
-        # guarantees the robot points at the target at arrival.
-        ball_map_x = robot_x + base_x * cos_y - base_y * sin_y
-        ball_map_y = robot_y + base_x * sin_y + base_y * cos_y
-        map_yaw = math.atan2(ball_map_y - map_y, ball_map_x - map_x)
-
-        logger.info(
-            f"  [approach-seg {step+1}] nav2 → map ({map_x:.2f}, {map_y:.2f}, "
-            f"yaw={map_yaw:.2f})"
-        )
-        try:
-            await mcp.call_tool_prefixed(
-                "nav2__navigate_to_pose",
-                {
-                    "x": round(map_x, 3),
-                    "y": round(map_y, 3),
-                    "yaw": round(map_yaw, 3),
-                },
-            )
-            tool_calls += 1
-        except Exception as e:
-            logger.error(f"  [approach-seg {step+1}] nav2 failed: {e}")
-            return False, tool_calls
-
-        # Wait until robot stops decelerating before next iteration's segment
-        await _wait_until_still(mcp)
-
-    logger.info(
-        f"  [approach-seg] iterations exhausted; last distance={last_distance:.2f}m"
-    )
-    return (last_distance is not None and last_distance < standoff_distance + 0.5), tool_calls
-
-
 async def _verify_target_visible(
     mcp: MCPClient, target_object: str
 ) -> tuple[bool, str, int]:
-    """Hard segmentation gate: target_object MUST be segmented on at least
-    one camera before navigator success is accepted.
+    """Segmentation gate: target_object MUST be segmented on at least one
+    camera (arm preferred, front acceptable) before navigator success is
+    accepted.
+
+    Architectural contract (Giovanni-aligned, 2026-04-30): the navigator
+    only guarantees that the target is visible to the front camera at
+    handoff. The pick/place agent owns the fine-approach step (creep)
+    and re-segments on the arm camera once close. So a front-cam
+    SUCCESS is sufficient — the pick agent will drive in and resegment.
+
+    Arm-cam SUCCESS is treated as "even better" — it means the robot is
+    already in pick range and the handoff is golden.
 
     Flow:
-      1. SAM3 on front camera; on SUCCESS → accept.
-      2. SAM3 on arm camera; on SUCCESS → accept.
-      3. If both miss, spin-and-search up to ``_VERIFY_SPIN_STEPS`` times
-         (front camera each spin). The robot often lands off-axis after
-         nav2, so the ball sits just outside the FOV — a short spin
-         sequence recovers it without giving up.
-      4. If still nothing, return False so _final_verify_gate flips
-         success=False.
-
-    SAM3 returns no mask if the object isn't there, so this is ground
-    truth, not opinion.
+      1. SAM3 on arm camera; on SUCCESS → accept (best handoff state).
+      2. SAM3 on front camera; on SUCCESS → accept (good handoff state —
+         pick will creep in).
+      3. If both miss, spin-search up to ``_VERIFY_SPIN_STEPS`` times.
+         Each spin: re-check arm cam first, then front cam. Accept the
+         first SUCCESS.
+      4. If still nothing, return False.
 
     Returns: (visible, info, tool_calls_used)
     """
@@ -514,10 +177,13 @@ async def _verify_target_visible(
             tool_calls += 1
             return None
 
-    # 1+2: stationary check on both cameras
-    for camera in ("front", "arm"):
-        if await _seg(camera) == "SUCCESS":
-            return True, f"verified on {camera} camera", tool_calls
+    # 1: arm cam (best handoff)
+    if await _seg("arm") == "SUCCESS":
+        return True, "verified on arm camera", tool_calls
+
+    # 2: front cam (acceptable — pick will creep)
+    if await _seg("front") == "SUCCESS":
+        return True, "verified on front camera (pick will creep)", tool_calls
 
     # 3: spin-and-search — robot likely landed off-axis from nav2
     _VERIFY_SPIN_STEPS = 6
@@ -525,7 +191,7 @@ async def _verify_target_visible(
     logger.info(
         f"  [verify] both cameras missed; spin-searching up to "
         f"{_VERIFY_SPIN_STEPS} × {_VERIFY_SPIN_ANGLE:.2f}rad for "
-        f"'{target_object}'"
+        f"'{target_object}' (arm + front check each spin)"
     )
     for i in range(_VERIFY_SPIN_STEPS):
         try:
@@ -538,10 +204,17 @@ async def _verify_target_visible(
             tool_calls += 1
             continue
         await _wait_until_still(mcp)
+        await asyncio.sleep(1.25)  # camera buffer flush after spin
+        if await _seg("arm") == "SUCCESS":
+            return (
+                True,
+                f"verified on arm camera after {i+1} spin(s)",
+                tool_calls,
+            )
         if await _seg("front") == "SUCCESS":
             return (
                 True,
-                f"verified on front camera after {i+1} spin(s)",
+                f"verified on front camera after {i+1} spin(s) (pick will creep)",
                 tool_calls,
             )
 
@@ -551,80 +224,95 @@ async def _verify_target_visible(
 async def _try_spin_search(
     mcp: MCPClient, target_object: str | None, result: dict
 ) -> dict:
-    """Post-process navigator result with deterministic helpers.
+    """Post-process navigator result.
 
-    Flow:
-    - If no target_object, return as-is.
-    - If LLM already found the target (success=True), run the front-camera
-      segmentation approach helper to place the robot at grasping standoff.
-    - Otherwise, run spin-search; if it finds the target, also run the
-      segmentation approach helper.
+    Architectural contract (Giovanni-aligned, 2026-04-30): the navigator
+    is responsible only for landing the robot at a known map coordinate
+    AND ensuring the target is visible (front camera minimum, arm
+    camera ideal) at handoff. The drive-closer step is OWNED by the
+    pick/place agent — they have a creep primitive that re-segments on
+    arm cam and approaches under their own control.
+
+    So the post-process is small:
+      - LLM SUCCESS → straight to verify gate (no drive-closer).
+      - LLM FAILURE + Check 1 PASS (correct area, target not seen) →
+        spin-search to bring it into view, then verify gate.
+      - LLM FAILURE + Check 1 FAIL (wrong area) → return FAILURE; the
+        orchestrator will replan navigation.
+
+    The verify gate (``_final_verify_gate`` → ``_verify_target_visible``)
+    accepts SAM3 SUCCESS on either camera; pick will creep on arm cam
+    from there.
     """
     if not target_object:
         return result
 
     if result["success"]:
         logger.info(
-            f"  LLM reported SUCCESS for '{target_object}' — refining approach "
-            f"via front segmentation"
+            f"  LLM saw '{target_object}' via look() — going to verify gate"
         )
-        approach_ok, approach_calls = await _segment_and_approach_front(mcp, target_object)
-        result["tool_calls_used"] += approach_calls
-        if approach_ok:
-            result["reason"] = (
-                f"{result['reason']}\n\n"
-                f"[post] Front-camera approach refined — robot at standoff."
-            )
-            return await _final_verify_gate(mcp, target_object, result)
-
-        # Target not in front view from the initial nav pose — try spin-search
-        # to rotate until SAM3 sees it, then approach again.
-        logger.info(
-            f"  Target not in initial front view — spin-searching for '{target_object}'"
-        )
-        found, _info, spin_calls = await _spin_search(mcp, target_object)
-        result["tool_calls_used"] += spin_calls
-        if found:
-            approach_ok, approach_calls = await _segment_and_approach_front(
-                mcp, target_object
-            )
-            result["tool_calls_used"] += approach_calls
-            result["reason"] = (
-                f"{result['reason']}\n\n"
-                f"[post] Target not in initial view; found after spin-search. "
-                f"Approach: {'refined' if approach_ok else 'failed'}."
-            )
-        else:
-            result["success"] = False
-            result["reason"] = (
-                f"{result['reason']}\n\n"
-                f"[post] Area confirmed, but target not found after spin-search."
-            )
         return await _final_verify_gate(mcp, target_object, result)
 
-    logger.info(f"  LLM didn't find '{target_object}' — starting deterministic spin-search")
+    # LLM did not see the target. Three failure modes:
+    #   - Check 1 explicitly FAIL: wrong area / never reached destination.
+    #     Spinning here is wasted motion (target is presumably elsewhere).
+    #     Report FAILURE so the orchestrator can replan.
+    #   - Check 1 PASS, Check 2 FAIL: in the right area but target not
+    #     visible from current angle. Spin-search makes sense.
+    #   - Check 1 NEITHER (max tool calls hit, parse failure, LLM error):
+    #     we don't actually know if we're in the right area. Spin-search
+    #     is cheap insurance — try it. If we're in the wrong room SAM3
+    #     just won't anchor, and the gate FAILS cleanly anyway.
+    reason_text = result.get("reason", "")
+    check1_match = re.search(
+        r"Check\s*1[^\n]*?(PASS|FAIL)", reason_text, re.IGNORECASE
+    )
+    check1_explicit_fail = bool(
+        check1_match and check1_match.group(1).upper() == "FAIL"
+    )
+    if check1_explicit_fail:
+        logger.info(
+            f"  Check 1 (area) reported FAIL; skipping spin-search "
+            f"(robot is not in the right area)"
+        )
+        result["reason"] = (
+            f"{reason_text}\n\n"
+            f"[post] Check 1 (area) failed — skipped spin-search; "
+            f"orchestrator should retry navigation."
+        )
+        return result
+
+    logger.info(
+        f"  LLM didn't find '{target_object}' — starting deterministic spin-search"
+    )
     found, scene_text, spin_calls = await _spin_search(mcp, target_object)
     result["tool_calls_used"] += spin_calls
 
     if found:
-        logger.info(f"  Found '{target_object}' — refining approach via front segmentation")
-        approach_ok, approach_calls = await _segment_and_approach_front(mcp, target_object)
-        result["tool_calls_used"] += approach_calls
+        logger.info(
+            f"  Found '{target_object}' via spin — handing off to verify gate"
+        )
         result["success"] = True
         result["reason"] = (
             f"Found '{target_object}' after spin-search. "
-            f"Segmentation approach: {'completed' if approach_ok else 'failed/skipped'}. "
             f"Scene: {scene_text[:400] if scene_text else 'N/A'}"
         )
     return await _final_verify_gate(mcp, target_object, result)
 
 
 async def _final_verify_gate(
-    mcp: MCPClient, target_object: str, result: dict
+    mcp: MCPClient,
+    target_object: str,
+    result: dict,
 ) -> dict:
     """Hard gate: a navigator result with success=True is only accepted if
-    SAM3 can still segment the target_object on the front or arm camera
-    *right now*. Catches LLM hallucinations and lenient approach escapes."""
+    SAM3 can still segment the target on front or arm camera *right now*.
+
+    Pick / place will use the arm camera, so this is the ground-truth
+    contract: the target MUST be SAM3-segmentable at handoff. If both
+    cameras + a recovery spin-search miss, success is overturned to
+    FAILURE — even when the LLM's look() said it saw the target.
+    """
     if not result.get("success"):
         return result
     visible, info, calls = await _verify_target_visible(mcp, target_object)
@@ -644,13 +332,15 @@ async def _final_verify_gate(
     return result
 
 
+
 async def execute_navigate(
     mcp: MCPClient,
     destination: str,
     target_object: str | None = None,
     approach_pose: tuple[float, float, float] | None = None,
     model: str = None,
-    max_tool_calls: int = 8,
+    max_tool_calls: int = 15,
+    post_verify: bool = True,
 ) -> dict:
     """Run a navigator agent to move the robot to a destination.
 
@@ -680,9 +370,9 @@ async def execute_navigate(
             f"Navigate to: \"{destination}\"\n"
             f"Approach pose hint (map frame): x={x}, y={y}, yaw={yaw}\n\n"
             "Drive to the approach pose and verify you are at the right "
-            "LOCATION (surface + room context) using describe_scene."
+            "LOCATION (surface + room context) using look(camera=\"front\")."
         )
-        max_tool_calls = 8  # bounded: arm tuck + nav + describe + retry
+        max_tool_calls = 15  # arm tuck + nav + look + recovery headroom
         logger.info(
             f"Navigator started (with pose hint): ({x}, {y}, {yaw}) "
             f"dest='{destination}'"
@@ -721,13 +411,14 @@ async def execute_navigate(
                 )
 
                 try:
-                    result = await mcp.call_tool_prefixed(tc_name, tc_args)
-                    if tc_name == "perception__describe_scene":
-                        logger.info(
-                            f"  [nav {tool_call_count}] describe_scene -> {result[:800]}"
-                        )
-                    if len(result) > 3000:
-                        result = result[:3000] + "\n... (truncated)"
+                    if tc_name == "perception__look":
+                        # MCP `look` returns image content blocks; preserve
+                        # them as-is so the LLM sees the actual pixels.
+                        result = await mcp.call_tool_prefixed_raw(tc_name, tc_args)
+                    else:
+                        result = await mcp.call_tool_prefixed(tc_name, tc_args)
+                        if len(result) > 3000:
+                            result = result[:3000] + "\n... (truncated)"
                     tool_results.append(tool_result_message(tc_id, result))
                 except Exception as e:
                     logger.error(f"  Tool error: {e}")
@@ -752,6 +443,9 @@ async def execute_navigate(
                 "reason": final_text,
                 "tool_calls_used": tool_call_count,
             }
+            if not post_verify:
+                logger.info("Post-verify disabled — returning LLM result as-is.")
+                return result
             return await _try_spin_search(mcp, target_object, result)
         else:
             stop = response.choices[0].finish_reason
@@ -768,4 +462,6 @@ async def execute_navigate(
         "reason": f"Exceeded maximum tool calls ({max_tool_calls})",
         "tool_calls_used": tool_call_count,
     }
+    if not post_verify:
+        return result
     return await _try_spin_search(mcp, target_object, result)
