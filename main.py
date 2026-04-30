@@ -3,8 +3,9 @@
 
 Usage:
     python3 -m multi_agent.main --task "pick up the screwdriver from the coffee table and bring it to the kitchen table"
-    python3 -m multi_agent.main --test-pick          # Test single pick
-    python3 -m multi_agent.main --test-navigator the kitchen area --target-object "red can on the floor"
+    python3 -m multi_agent.main --test-pick "screwdriver"        
+    python3 -m multi_agent.main --test-navigator "kitchen" --target-object "red coke can"
+    python3 -m multi_agent.main --test-place "trashbin"  
 """
 
 import argparse
@@ -20,22 +21,20 @@ from multi_agent.orchestrator import run_orchestrator
 
 # === CONFIGURATION ===
 
-# LLM model — set LLM_MODEL env var to switch providers, e.g.:
-#   export LLM_MODEL=gpt-4o              (OpenAI)
-#   export LLM_MODEL=ollama/llama3       (local Ollama)
-#   export LLM_MODEL=anthropic/claude-sonnet-4-20250514  (Anthropic, default)
-# Per-role overrides: ORCHESTRATOR_MODEL, EXECUTOR_MODEL, NAVIGATOR_MODEL
+# LLM model — provider-agnostic via LiteLLM. Set LLM_MODEL in your .env
+# to any model id LiteLLM recognises, e.g.:
+#   LLM_MODEL=gpt-4o                                # OpenAI
+#   LLM_MODEL=ollama/llama3                         # local Ollama
+#   LLM_MODEL=anthropic/claude-sonnet-4-20250514    # Anthropic
+#   LLM_MODEL=openai/qwen3-vl-...                   # any OpenAI-compatible
+# Per-role overrides: ORCHESTRATOR_MODEL, EXECUTOR_MODEL, NAVIGATOR_MODEL.
+# Whatever provider is selected, ensure its native API key env var is
+# exported (e.g. ANTHROPIC_API_KEY, OPENAI_API_KEY) — LiteLLM picks them
+# up automatically.
 LLM_MODEL = os.environ.get("LLM_MODEL", "anthropic/claude-sonnet-4-20250514")
 ORCHESTRATOR_MODEL = os.environ.get("ORCHESTRATOR_MODEL", LLM_MODEL)
 EXECUTOR_MODEL = os.environ.get("EXECUTOR_MODEL", LLM_MODEL)
 NAVIGATOR_MODEL = os.environ.get("NAVIGATOR_MODEL", LLM_MODEL)
-
-DEFAULT_TASK = (
-    "Pick up the black scissors from the wooden table in the living room "
-    "(near the white couch) and place it on the wooden dining table "
-    "in the kitchen area (with the navy blue chairs)."
-)
-
 
 async def test_pick(object_name: str):
     """Test pick executor on a single object (no orchestrator/navigator).
@@ -72,7 +71,10 @@ async def test_place(target_container: str):
         print(json.dumps(result, indent=2))
 
 
-async def test_navigator(destination: str, target_object: str | None = None):
+async def test_navigator(
+    destination: str,
+    target_object: str | None = None,
+):
     """Test the navigator with a natural language destination (no orchestrator)."""
     from multi_agent.navigator import execute_navigate
 
@@ -171,9 +173,13 @@ def main():
     elif args.test_navigator:
         dest = " ".join(args.test_navigator)
         asyncio.run(test_navigator(dest, args.target_object))
+    elif args.task:
+        asyncio.run(run_full(args.task))
     else:
-        task = args.task or DEFAULT_TASK
-        asyncio.run(run_full(task))
+        parser.error(
+            "no action specified — pass --task, --test-pick, --test-place, "
+            "or --test-navigator"
+        )
 
 
 if __name__ == "__main__":

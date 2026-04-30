@@ -340,7 +340,6 @@ async def execute_navigate(
     approach_pose: tuple[float, float, float] | None = None,
     model: str = None,
     max_tool_calls: int = 15,
-    post_verify: bool = True,
 ) -> dict:
     """Run a navigator agent to move the robot to a destination.
 
@@ -443,9 +442,6 @@ async def execute_navigate(
                 "reason": final_text,
                 "tool_calls_used": tool_call_count,
             }
-            if not post_verify:
-                logger.info("Post-verify disabled — returning LLM result as-is.")
-                return result
             return await _try_spin_search(mcp, target_object, result)
         else:
             stop = response.choices[0].finish_reason
@@ -462,6 +458,4 @@ async def execute_navigate(
         "reason": f"Exceeded maximum tool calls ({max_tool_calls})",
         "tool_calls_used": tool_call_count,
     }
-    if not post_verify:
-        return result
     return await _try_spin_search(mcp, target_object, result)

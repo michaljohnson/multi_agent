@@ -21,12 +21,6 @@ SERVER_SHORT_NAMES = {
     "perception-mcp-server": "perception",
 }
 
-# Camera topics used by MCPClient.look() for visual reasoning in agents.
-CAMERA_TOPICS = {
-    "front": "/front_rgbd_camera/color/image_raw/compressed",
-    "arm": "/arm_camera/color/image_raw/compressed",
-}
-
 
 class MCPClient:
     """Manages connections to all MCP servers and provides unified tool access."""
@@ -120,42 +114,6 @@ class MCPClient:
         server_name, tool_name = self.route_tool_call(prefixed_name)
         return await self.call_tool_raw(server_name, tool_name, args)
 
-    async def look(self, camera: str = "front") -> list[dict]:
-        """Return camera frame(s) as tool-result content blocks
-        (text label + image_url block per camera). Shared primitive used
-        by the orchestrator and navigator for visual ground-truth reasoning.
-
-        camera="both" returns front + arm back-to-back in one result so
-        the LLM sees chassis + wrist views together — useful for area
-        judgments where each angle complements the other.
-
-        Raises ValueError for an unknown camera name.
-        """
-        if camera == "both":
-            names = ["front", "arm"]
-        elif camera in CAMERA_TOPICS:
-            names = [camera]
-        else:
-            raise ValueError(
-                f"Invalid camera {camera!r}: choose from "
-                f"{sorted(CAMERA_TOPICS) + ['both']}"
-            )
-
-        blocks: list[dict] = []
-        for name in names:
-            frame = await self.call_tool_prefixed_raw(
-                "ros__subscribe_once",
-                {
-                    "topic": CAMERA_TOPICS[name],
-                    "msg_type": "sensor_msgs/msg/CompressedImage",
-                    "expects_image": "true",
-                    "timeout": 3.0,
-                },
-            )
-            blocks.append({"type": "text", "text": f"{name} camera image:"})
-            blocks.extend(frame)
-        return blocks
-
     def route_tool_call(self, prefixed_name: str) -> tuple[str, str]:
         """Route a prefixed tool name to (server_name, tool_name).
 
@@ -211,18 +169,16 @@ class MCPClient:
 
         return result
 
-    def get_tools(self, servers: list[str] | None = None) -> list[dict]:
+    def get_tools(self) -> list[dict]:
         """Convert MCP tool schemas to OpenAI-format tool definitions.
 
-        Args:
-            servers: List of server short names to include (e.g. ["perception", "moveit"]).
-                     If None, include all servers.
+        Returns all tools across all connected servers, prefixed with the
+        server short name (e.g. 'perception__look'). Caller-side filtering
+        is done with per-agent allowlists (e.g. NAVIGATOR_TOOLS).
         """
         tools = []
         for server_name, server_tools in self._tools.items():
             short = SERVER_SHORT_NAMES.get(server_name, server_name)
-            if servers and short not in servers:
-                continue
             for tool in server_tools:
                 tools.append({
                     "type": "function",
@@ -233,10 +189,3 @@ class MCPClient:
                     },
                 })
         return tools
-
-    def list_all_tools(self) -> dict[str, list[str]]:
-        """List all available tools grouped by server (for debugging)."""
-        return {
-            SERVER_SHORT_NAMES.get(name, name): [t.name for t in tools]
-            for name, tools in self._tools.items()
-        }
