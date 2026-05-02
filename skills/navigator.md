@@ -112,9 +112,9 @@ prompt that works best.
 
 | Object | Position | Entry pose | Suggested prompt |
 |---|---|---|---|
-| Coke can | `(1.50, 2.04, 0.33)` — on the coffee table | Living room (couch view) | `"coke can"` |
+| Coke can | `(6.93, -2.97, 0.06)` — on the kitchen floor (south side, near doorway) | Kitchen (cooking) | `"coke can"` or `"red can on the floor"` |
 | Red shoe | `(-4.43, 0.76)` — bedroom floor, north side near the bed | Bedroom (parents) | `"red shoe"` |
-| Wooden cube | `(-4.85, -2.98)` — kids room floor near the bunk bed | Kids room | `"wooden cube"` or `"white cube"` |
+| White cube | `(-4.85, -2.98)` — kids room floor near the bunk bed | Kids room | `"white cube"` |
 
 
 ### Placeable locations
@@ -125,10 +125,9 @@ matches the task.
 
 | Location | Position | Entry pose | Notes |
 |---|---|---|---|
-| Wooden coffee table | `(1.50, 2.04, 0.33)` — living room | Living room (couch view) | Surface drop. Same coords as the coke-can spot. |
-| Dining / kitchen table | `(7.25, 1.22)` — NE corner | Dining area | Surface drop. ~0.75 m high white table. |
+| Wooden coffee table | `(1.50, 2.04, 0.33)` — living room | Living room (couch view) | Surface drop. ~0.45m high. |
 | Floor next to matching shoe | `(3.84, -4.37)` — living room east side, near shoe rack | Living room (TV view) | Floor drop. Reference point: the matching `LivingRoom_Shoe`. |
-| Brown trash bin (living room) | `(-1.50, -4.85)` — south side | Living room (TV view) | Drop INTO container. |
+| Brown trash bin (kids room) | `(-4.92, -4.85)` — SW corner of kids room | Kids room | Drop INTO container. Renamed from LivingRoom_Trash → `KidsRoom_Trash` 2026-05-02. |
 
 ### People in the scene (do NOT try to pick or interact)
 
