@@ -8,66 +8,148 @@ navigator handed off). Your job is to grasp it and lift it.
 
 ## Procedure
 
-1. **Clear octomap** — `ros__call_service` with `service_name="/clear_octomap"`,
+The navigator hands off with the arm in `look_forward` and the planning
+scene clean. The current scope is floor pickup + low coffee table (≤40cm),
+both visible in the arm camera at `look_forward`. The arm stays at
+`look_forward` for the entire pick (segmentation, pre-grasp, lower,
+close, lift, return). Higher surfaces are out of scope.
+
+1. **Move arm to `look_forward` (mandatory — fast no-op if already there)**
+   — `moveit__plan_and_execute` with `group="arm"`,
+   `target_type="named_state"`, `target={"state_name":"look_forward"}`.
+   If named_state fails, use joint values: `target_type="joint_state"`,
+   `target={"joint_positions":[-0.0001, -0.2429, -2.8291, -0.7983, 1.5622, 0.0]}`.
+
+   **Why this step is mandatory even though navigator hands off in
+   look_forward**: on RETRY (orchestrator called pick again after a
+   failed first attempt) the arm may be left in any pose — pre-grasp,
+   half-closed grasp, recovery position. Without this step, the
+   second attempt's segmentation sees the gripper hovering in front
+   of the camera instead of the target. Cheap insurance (~5s in slow
+   sim if not actually moving; ~10s if it is).
+
+2. **Clear octomap** — `ros__call_service` with `service_name="/clear_octomap"`,
    `service_type="std_srvs/srv/Empty"`, `request={}`.
 
-2. **Segment the object** — `perception__segment_objects` with
-   `prompt="<object_name>"` AND `camera="arm"`. ALWAYS use the arm camera
-   for picking; the front camera is for navigation only and its
-   pointcloud / distances are off for grasp geometry.
+2. **Segment the object — arm-cam first, front-cam fallback for distant targets:**
+   a. First try `perception__segment_objects` with `prompt="<object_name>"`
+      and `camera="arm"`. If `SUCCESS`: continue to step 4.
+   b. If `NO_OBJECTS_FOUND`: the navigator handed off too far for arm-cam
+      to see the target (small floor objects vanish at >1m in arm-cam FOV).
+      Fall back to `perception__segment_objects` with `camera="front"` —
+      front-cam has wider FOV and sees the area from robot height. This
+      primes the segmentation cache with the cube's location for
+      `get_topdown_grasp_pose` (which works regardless of source camera —
+      TF transforms to base_footprint correctly).
+   c. After creep_closer brings the robot within ~1m of the target,
+      ALWAYS re-segment with `camera="arm"` — the front-cam pose was
+      only a coarse approach hint, the actual grasp must use arm-cam
+      geometry (which is what creep_closer's internal re-segment does
+      automatically).
 
-3. **Compute grasp pose** — `perception__get_grasp_from_pointcloud` with
+3. **Compute grasp pose** — `perception__get_topdown_grasp_pose` with
    `object_name="<object_name>"`. Returns a grasp pose in `base_footprint`
    frame with the 14cm gripper finger offset already applied.
 
-4. **Reach check.** The UR5 arm reaches about **0.95m** forward from
-   `base_footprint` (nominal spec is 0.85m, but the joint chain extends
-   further when fully unfolded — empirically validated to 0.95m). Look
-   at the grasp pose `position[0]` (x):
-   - If x ≤ 0.95m → continue to step 5.
-   - If x > 0.95m → call `creep_closer(object_name, current_grasp_x)`.
-     This is a single tool call that drives the base forward, re-segments,
-     and recomputes the grasp. Read the new grasp_x from its output and
-     re-check.
-   - You may call `creep_closer` AT MOST 2 times per pick. If grasp_x is
-     still > 0.95m after the 2nd creep, report FAILURE.
+   **Sanity-check the centroid z** (in `centroid_base_frame.z`):
+   - Floor objects should have z ≈ 0.02–0.10m (object resting on floor).
+   - Coffee table objects should have z ≈ 0.40–0.55m (table top + object height).
+   - If z is implausibly high (e.g. > 0.3m for a floor object), SAM3 likely
+     locked onto a wrong nearby object (shelf, cubby, picture, etc.). Go
+     back to step 3 with a MORE SPECIFIC prompt that includes context, e.g.
+     `"small white cube on wooden floor"` instead of `"white cube"`. Tighter
+     prompts disambiguate when the scene contains multiple white objects.
+   - If three different prompts in a row still return implausible z, report
+     FAILURE — the object may not be reachably segmentable from this pose.
 
-5. **Open gripper** — `ros__send_action_goal` with
+5. **Reach check.** The UR5 arm reaches about **1.10m** forward from
+   `base_footprint` (nominal spec is 0.85m; with full joint extension and
+   MoveIt's planning tolerance it reaches ~1.10m). Look at the grasp pose
+   `position[0]` (x):
+   - If x ≤ 1.10m → continue to step 6 (try the grasp; MoveIt will fail
+     fast if the pose is genuinely unreachable, in which case go back to
+     creep).
+   - If x > 1.10m → call `creep_closer(object_name, current_grasp_x)`.
+     This drives the base forward, re-segments, and recomputes the grasp.
+     The creep return text starts with `STATUS: TARGET_VISIBLE` (success)
+     or `STATUS: TARGET_LOST` (re-segment failed after drive).
+
+     **If `STATUS: TARGET_VISIBLE`:**
+     - Read the new grasp_x from the `--- grasp ---` block in the output.
+     - If new grasp_x ≤ 1.10m: proceed to step 6.
+     - If new grasp_x > 1.10m AND it dropped by ≥5cm vs the previous
+       value: call creep AGAIN with the new grasp_x. Don't pass stale
+       grasp_x.
+     - If new grasp_x did NOT drop by ≥5cm vs the previous value, OR
+       the creep return contains "nav2 hop timed out": robot is stuck.
+       Report FAILURE — do NOT keep creeping.
+
+     **If `STATUS: TARGET_LOST`** (post-drive re-segment failed): the
+     target may have fallen out of arm-cam FOV (too close, off-axis, or
+     SAM3 missed). DO NOT call creep again immediately. Instead:
+     1. Call `perception__look(camera="arm")` to inspect what the arm
+        camera actually sees.
+     2. Reason on the image:
+        - Target VISIBLE in image but SAM3 missed it → call
+          `perception__segment_objects` again with a more specific
+          prompt (e.g. `"small white cube on wooden floor"` instead of
+          `"cube"`). Then go back to step 4.
+        - Target NOT VISIBLE in image (out of FOV or behind something)
+          → report FAILURE. Do not retry creep blindly — the navigator
+          needs to handle this on the next attempt.
+
+     - Cap: up to 5 creeps total. If after 5 creeps grasp_x is still
+       > 0.95m but progress was steady, attempt the grasp anyway with
+       the latest pose.
+
+6. **Open gripper** — `ros__send_action_goal` with
    `action_name="/robotiq_gripper_controller/gripper_cmd"`,
    `action_type="control_msgs/action/GripperCommand"`,
    `goal={"command":{"position":0.0,"max_effort":50.0}}`.
 
-6. **Pre-grasp approach** — `moveit__plan_and_execute` with `group="arm"`,
+7. **Pre-grasp approach** — `moveit__plan_and_execute` with `group="arm"`,
    `target_type="pose"`,
    `target={"position":[x, y, grasp_z + 0.10], "orientation":[1,0,0,0], "frame_id":"base_footprint"}`.
 
-7. **Lower to grasp** — same as step 6 but with the exact grasp z position.
+8. **Lower to grasp** — same as step 7 but with the exact grasp z position.
 
-8. **Close gripper** — `ros__send_action_goal` with
+9. **Close gripper** — `ros__send_action_goal` with
    `goal={"command":{"position":0.7,"max_effort":50.0}}`.
 
-9. **Verify grasp — THIS is the success gate.** `ros__subscribe_once` on
-   `topic="/gripper/status"`, `msg_type="std_msgs/msg/String"`,
-   `timeout=3.0`. Check the `data` field:
-   - `"attached:<model_name>"` where `<model_name>` matches the target
-     object → grasp SUCCEEDED. Proceed to lift, then report SUCCESS at
-     the end. **This signal is ground truth** — it comes directly from
-     gripper_attach_node which interfaces with Gazebo's physics. Trust it.
-   - `"detached"` or `"attached:<wrong_name>"` → grasp FAILED, report
-     FAILURE.
-   - Timeout (no message) → re-subscribe ONCE with `timeout=5.0`. If
-     still no message, treat as FAILURE (the attach node should be
-     publishing continuously when the gripper is closed).
+10. **Verify grasp — THIS is the success gate.**
+   `gripper_attach_node` needs a moment after gripper close to detect
+   the contact, so do NOT check immediately. Sequence:
+   1. After step 9 returns, call `ros__subscribe_once` on
+      `topic="/gripper/status"`, `msg_type="std_msgs/msg/String"`,
+      `timeout=8.0`. The first message arriving on a latched topic IS
+      the latest published value — but `gripper_attach_node` updates
+      it as soon as physics settles, so an 8s window is enough to
+      catch the change.
+   2. Read `data`:
+      - `"attached:<model_name>"` where `<model_name>` matches the
+        target object → grasp SUCCEEDED. Proceed to lift.
+      - `"detached"` or `"attached:<wrong_name>"` → re-subscribe ONCE
+        more with `timeout=5.0` (attach can lag close by a couple
+        seconds). If still detached / wrong-name, report FAILURE.
+      - Timeout with no message → re-subscribe ONCE with `timeout=5.0`.
+        Still nothing → FAILURE (attach node should publish on every
+        close). **This signal is ground truth** — it comes from
+        gripper_attach_node interfacing with Gazebo's physics. Trust it.
 
-10. **Lift** — `moveit__plan_and_execute` to `[x, y, grasp_z + 0.20]`.
+11. **Lift** — `moveit__plan_and_execute` to `[x, y, grasp_z + 0.20]`.
 
-11. **Return to look_forward** — `moveit__plan_and_execute` with `group="arm"`,
-    `target_type="named_state"`, `target={"state_name":"look_forward"}`.
-    If the named state fails, use joint values:
+12. **Return to look_forward (transit pose)** — `moveit__plan_and_execute`
+    with `group="arm"`, `target_type="named_state"`,
+    `target={"state_name":"look_forward"}`. If the named state fails,
+    use joint values:
     `target_type="joint_state"`,
     `target={"joint_positions":[-0.0001, -0.2429, -2.8291, -0.7983, 1.5622, 0.0]}`.
+    Note: this is the ORIGINAL `look_forward` (wrist_1=-0.7983) — the
+    low-profile, navigator-friendly transit pose, NOT the tilted version
+    used during pick. Returning to original look_forward avoids unnecessary
+    arm motion when the navigator hands off the next leg.
 
-12. **Report SUCCESS** based on the step 9 result. Do NOT call
+13. **Report SUCCESS** based on the step 10 result. Do NOT call
     `moveit__list_collision_objects` to second-guess the gripper status —
     MoveIt's planning scene is only populated by explicit
     `attach_collision_object` calls (which this procedure does not make),
@@ -82,15 +164,26 @@ navigator handed off). Your job is to grasp it and lift it.
   grasp computations.
 - FRAME: Always use `base_footprint`, NEVER `odom` or `map`.
 - ORIENTATION: Always use quaternion `[1,0,0,0]` for top-down grasp (w,x,y,z).
-- The grasp pose from `get_grasp_from_pointcloud` already includes the
+- The grasp pose from `get_topdown_grasp_pose` already includes the
   14cm gripper finger offset. Use it directly.
 - If `plan_and_execute` reports "failed", call `moveit__get_current_pose`
   to check whether the arm actually moved (the sim runs slow and
   sometimes reports false failures).
-- If planning fails twice from the same state: call
-  `moveit__clear_planning_scene`, then `moveit__plan_and_execute` to
-  named_state `"look_forward"`, then retry.
-- Do NOT call `get_grasp_from_pointcloud` a second time after moving the
+- If `plan_and_execute` for pre-grasp/lower fails: FIRST try
+  `moveit__clear_planning_scene` + retry the SAME pre-grasp pose
+  (often a stale collision object blocks planning; clearing fixes it
+  without arm motion). Only if that ALSO fails, fall back to
+  `plan_and_execute` named_state `"look_forward"` THEN re-segment +
+  recompute grasp THEN retry. Avoid the look_forward reset when not
+  necessary — it costs ~10s of arm motion + a re-segment cycle.
+- **CRITICAL: re-segment after ANY arm reposition.** If between
+  `get_topdown_grasp_pose` and the actual pre-grasp execution the arm
+  has been moved (e.g. recovery move to `look_forward` after a planning
+  failure), do NOT reuse the cached grasp pose — the TF snapshot is
+  stale relative to the new arm pose. Re-run `clear_octomap` +
+  `segment_objects(camera="arm")` + `get_topdown_grasp_pose` to refresh
+  the cache, THEN retry the pre-grasp with the fresh values.
+- Do NOT call `get_topdown_grasp_pose` a second time after moving the
   arm. The cached pointcloud becomes stale. Reuse the grasp pose from
   the first call. (The `creep_closer` helper is the only sanctioned way
   to refresh the grasp.)
@@ -98,7 +191,7 @@ navigator handed off). Your job is to grasp it and lift it.
   reach a far target. Use `creep_closer` instead.
 - Report FAILURE honestly. Do NOT report SUCCESS unless the object was
   actually grasped and lifted. A false success is worse than a failure.
-- SUCCESS must be gated on step 9 (`/gripper/status` says
+- SUCCESS must be gated on step 10 (`/gripper/status` says
   `attached:<target_object>`). Motion completing is not enough — the
   gripper has to actually be holding the *right* object for the pick
   to have succeeded.

@@ -126,7 +126,7 @@ matches the task.
 | Location | Position | Entry pose | Notes |
 |---|---|---|---|
 | Wooden coffee table | `(1.50, 2.04, 0.33)` — living room | Living room (couch view) | Surface drop. ~0.45m high. |
-| Floor next to matching shoe | `(3.84, -4.37)` — living room east side, near shoe rack | Living room (TV view) | Floor drop. Reference point: the matching `LivingRoom_Shoe`. |
+| Floor next to matching shoe | `(3.84, -4.37)` — living room east side, near shoe rack | Living room (TV view) | Floor drop. **Navigation landmark: `"shoe rack"`** (large, easy to segment) — the matching `LivingRoom_Shoe` is too small to use as the navigator's target_object from across the room. |
 | Brown trash bin (kids room) | `(-4.92, -4.85)` — SW corner of kids room | Kids room | Drop INTO container. Renamed from LivingRoom_Trash → `KidsRoom_Trash` 2026-05-02. |
 
 ### People in the scene (do NOT try to pick or interact)

@@ -25,7 +25,9 @@ ORCHESTRATOR_TOOLS = [
             "description": (
                 "Navigate the robot to a destination. Spawns a navigator agent "
                 "that uses its own environment knowledge to drive there and "
-                "verifies arrival using perception."
+                "verifies arrival using perception. If target_object is given, "
+                "the navigator also closes to ~1m standoff from that object so "
+                "the next step (pick or place) starts within camera range."
             ),
             "parameters": {
                 "type": "object",
@@ -35,6 +37,19 @@ ORCHESTRATOR_TOOLS = [
                         "description": (
                             "Natural language description of where to go "
                             "(e.g. 'the wooden coffee table in the living room')."
+                        ),
+                    },
+                    "target_object": {
+                        "type": "string",
+                        "description": (
+                            "Optional. A visible landmark the navigator "
+                            "should stop close to (SAM3-verified + 1m standoff). "
+                            "Before a floor pickup: pass the object itself "
+                            "(e.g. 'red ball'). Before a place: pass the "
+                            "container name (e.g. 'trash bin'). Omit only "
+                            "when no specific landmark exists. (Surface "
+                            "pickups do NOT call navigate at all — the user "
+                            "pre-positions the robot next to the surface.)"
                         ),
                     },
                 },
@@ -73,7 +88,10 @@ ORCHESTRATOR_TOOLS = [
                 "container or surface. The robot must already be near the "
                 "target (call navigate first). Spawns a place agent that "
                 "segments the target on the front camera, computes its "
-                "centroid, lowers the object above it, releases, and retracts."
+                "centroid, releases the object above it, and retracts. "
+                "If `object_name` is provided, a post-step verifies the "
+                "object is no longer visible on the front camera (i.e. "
+                "actually dropped in)."
             ),
             "parameters": {
                 "type": "object",
@@ -85,12 +103,29 @@ ORCHESTRATOR_TOOLS = [
                             "(e.g. 'basket', 'cardboard box', 'kitchen table')."
                         ),
                     },
+                    "object_name": {
+                        "type": "string",
+                        "description": (
+                            "Optional. Name of the object currently held. "
+                            "When given, the place agent runs a ground-truth "
+                            "visibility check after release: if the object "
+                            "is still segmentable on the front camera, the "
+                            "place is treated as FAILED (the object did not "
+                            "land inside the container)."
+                        ),
+                    },
                 },
                 "required": ["target_container"],
             },
         },
     },
 ]
+
+# MCP tools the orchestrator is allowed to call directly (alongside its
+# Python-implemented sub-agent tools above).
+ORCHESTRATOR_MCP_TOOLS = {
+    "perception__look",
+}
 
 
 async def _handle_tool_call(
@@ -99,12 +134,17 @@ async def _handle_tool_call(
     tool_input: dict,
     executor_model: str,
     navigator_model: str,
-) -> str:
-    """Handle a tool call from the orchestrator."""
+):
+    """Handle a tool call from the orchestrator.
+
+    For sub-agent tools (navigate / pick / place) returns a JSON string.
+    For raw MCP tools (look, etc.) returns the raw content blocks.
+    """
     if tool_name == "navigate":
         result = await execute_navigate(
             mcp=mcp,
             destination=tool_input["destination"],
+            target_object=tool_input.get("target_object"),
             model=navigator_model,
         )
         return json.dumps(result)
@@ -121,12 +161,14 @@ async def _handle_tool_call(
         result = await execute_place(
             mcp=mcp,
             target_container=tool_input["target_container"],
+            object_name=tool_input.get("object_name"),
             model=executor_model,
         )
         return json.dumps(result)
 
-    else:
-        return f"Unknown tool: {tool_name}"
+    # MCP-routed tools (look, future direct-MCP tools) — go through the
+    # raw call path so image content blocks survive into the LLM message.
+    return await mcp.call_tool_prefixed_raw(tool_name, tool_input)
 
 
 async def run_orchestrator(
@@ -152,6 +194,12 @@ async def run_orchestrator(
         {"summary": str, "turns_used": int}
     """
     system_prompt = _SKILL_FILE.read_text()
+    all_mcp_tools = mcp.get_tools()
+    direct_mcp = [
+        t for t in all_mcp_tools
+        if t["function"]["name"] in ORCHESTRATOR_MCP_TOOLS
+    ]
+    all_tools = ORCHESTRATOR_TOOLS + direct_mcp
 
     messages = [
         {"role": "system", "content": system_prompt},
@@ -166,7 +214,7 @@ async def run_orchestrator(
 
         response = call_llm(
             messages=messages,
-            tools=ORCHESTRATOR_TOOLS,
+            tools=all_tools,
             model=orchestrator_model,
         )
 
