@@ -157,14 +157,46 @@ def main():
     )
     args = parser.parse_args()
 
-    level = logging.DEBUG if args.verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-        datefmt="%H:%M:%S",
-    )
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("mcp").setLevel(logging.WARNING)
+    if args.verbose:
+        # Full debug logging with timestamps + logger names + level
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+            datefmt="%H:%M:%S",
+        )
+    else:
+        # Demo-friendly: just an agent tag + the message. No timestamps,
+        # no levels (unless WARNING+), no LiteLLM / MCP framework noise.
+        # Easy to follow what each agent is doing.
+        class _AgentTagFormatter(logging.Formatter):
+            _TAGS = {
+                "multi_agent.orchestrator": "[ORCHESTRATOR]",
+                "multi_agent.navigator":    "[NAVIGATOR]   ",
+                "multi_agent.pick":         "[PICK]        ",
+                "multi_agent.place":        "[PLACE]       ",
+                "multi_agent.mcp_client":   "[MCP]         ",
+            }
+
+            def format(self, record: logging.LogRecord) -> str:
+                tag = self._TAGS.get(record.name, f"[{record.name}]")
+                msg = record.getMessage()
+                if record.levelno >= logging.WARNING:
+                    return f"{tag} {record.levelname}: {msg}"
+                return f"{tag} {msg}"
+
+        handler = logging.StreamHandler()
+        handler.setFormatter(_AgentTagFormatter())
+        root = logging.getLogger()
+        root.handlers = [handler]
+        root.setLevel(logging.INFO)
+
+    # Suppress framework noise regardless of verbosity unless explicitly DEBUG
+    framework_level = logging.DEBUG if args.verbose else logging.WARNING
+    logging.getLogger("httpx").setLevel(framework_level)
+    logging.getLogger("mcp").setLevel(framework_level)
+    logging.getLogger("LiteLLM").setLevel(framework_level)
+    logging.getLogger("litellm").setLevel(framework_level)
+    logging.getLogger("multi_agent.mcp_client").setLevel(framework_level)
 
     if args.test_pick:
         asyncio.run(test_pick(args.test_pick))
