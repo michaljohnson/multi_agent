@@ -31,17 +31,20 @@ CREEP_TOOL = {
     "function": {
         "name": "creep_closer",
         "description": (
-            "Drive the base forward to bring the grasp target into arm reach. "
-            "Use ONLY when get_topdown_grasp_pose returns x > 0.95m. "
-            "Reads /amcl_pose, drives nav2 forward by (current_grasp_x - 0.65)m, "
-            "clears the octomap, re-segments on the arm camera, and recomputes "
-            "the grasp pose. Returns the new segmentation + grasp output. "
+            "Drive the base to a 1.05m standoff facing the grasp target. "
+            "Use ONLY when get_topdown_grasp_pose returns x > 1.10m. "
+            "Computes the approach pose from the cached grasp (x, y) in "
+            "base_footprint + live nav2 pose, then dispatches "
+            "nav2.navigate_to_pose (long hop) or DriveOnHeading (short hop). "
+            "After the move: clears the octomap, re-segments on the arm "
+            "camera, and recomputes the grasp. Returns new segmentation + "
+            "grasp output, prefixed with STATUS: TARGET_VISIBLE on success "
+            "or STATUS: TARGET_LOST if post-drive arm-cam re-seg failed. "
             "Call repeatedly while grasp_x keeps decreasing (>=5cm per call). "
-            "Up to 5 creeps total. If a creep does NOT decrease grasp_x by "
-            ">=5cm vs the previous value, the robot is stuck (likely bumped "
-            "into furniture) — report FAILURE rather than retrying. If after "
-            "5 creeps grasp_x still > 0.95m but progress was steady, attempt "
-            "the grasp anyway with the latest pose."
+            "Cap: up to 3 creeps total. If a creep does NOT decrease grasp_x "
+            "by >=5cm vs the previous value, the robot is stuck — report "
+            "FAILURE. If after 3 creeps grasp_x still > 1.10m but progress "
+            "was steady, attempt the grasp anyway with the latest pose."
         ),
         "parameters": {
             "type": "object",

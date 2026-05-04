@@ -40,12 +40,12 @@ CREEP_TOOL = {
             "look_down_high — same pose as stage 1), and recomputes the "
             "coarse drop pose. Returns the new segmentation + drop pose. "
             "Call repeatedly while distance keeps decreasing (>=5cm per "
-            "call). Up to 5 creeps total — if reach is achieved earlier, "
-            "stop. If two consecutive creeps fail to decrease distance "
-            "by >=5cm, the robot is stuck; report FAILURE rather than "
-            "creeping more. If after 5 creeps distance is still > 0.65m "
-            "but progress was being made, proceed to stage 2 anyway "
-            "(MoveIt may still plan; better than aborting)."
+            "call). Cap: up to 3 creeps total — if reach is achieved "
+            "earlier, stop. If two consecutive creeps fail to decrease "
+            "distance by >=5cm, the robot is stuck; report FAILURE rather "
+            "than creeping more. If after 3 creeps distance is still > "
+            "0.65m but progress was being made, proceed to stage 2 "
+            "anyway (MoveIt may still plan; better than aborting)."
         ),
         "parameters": {
             "type": "object",

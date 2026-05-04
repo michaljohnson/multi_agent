@@ -21,6 +21,14 @@ SERVER_SHORT_NAMES = {
     "perception-mcp-server": "perception",
 }
 
+# Per-server tool-call timeout (seconds). nav2 short-circuits the
+# zombie-goal hang where the server-side action stays alive but the
+# client never gets a response.
+DEFAULT_TOOL_TIMEOUT = 120
+SERVER_TOOL_TIMEOUTS = {
+    "nav2-mcp-server": 45,
+}
+
 
 class MCPClient:
     """Manages connections to all MCP servers and provides unified tool access."""
@@ -66,8 +74,9 @@ class MCPClient:
     async def call_tool(self, server_name: str, tool_name: str, args: dict) -> str:
         """Call a tool on a specific MCP server. Returns result as string."""
         session = self._sessions[server_name]
+        timeout = SERVER_TOOL_TIMEOUTS.get(server_name, DEFAULT_TOOL_TIMEOUT)
         result = await session.call_tool(
-            tool_name, args, read_timeout_seconds=timedelta(seconds=120)
+            tool_name, args, read_timeout_seconds=timedelta(seconds=timeout)
         )
         # Combine all content blocks into a single string
         parts = []
@@ -88,8 +97,9 @@ class MCPClient:
         `call_tool()` which flattens to a string.
         """
         session = self._sessions[server_name]
+        timeout = SERVER_TOOL_TIMEOUTS.get(server_name, DEFAULT_TOOL_TIMEOUT)
         result = await session.call_tool(
-            tool_name, args, read_timeout_seconds=timedelta(seconds=120)
+            tool_name, args, read_timeout_seconds=timedelta(seconds=timeout)
         )
         blocks: list[dict] = []
         for block in result.content:

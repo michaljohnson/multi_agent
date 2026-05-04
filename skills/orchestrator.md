@@ -63,6 +63,34 @@ what a sub-agent just claimed).
 
 ## Strategy
 
+0. **Read the starting state before planning.** Before writing the
+   table, subscribe once to `/gripper/status` (`std_msgs/msg/String`,
+   latched). Two cases:
+
+   - `data: "detached"` → fresh start. Plan as usual: every row
+     begins with pickup.
+   - `data: "attached:<model_name>"` → the gripper already holds an
+     object from a previous run / manual setup / earlier failed
+     attempt that succeeded silently. **Do not call pick on the held
+     object.** If the held object matches the first row of the task,
+     skip its pick step and start from "navigate to place location".
+     If it does NOT match (held the wrong thing), report this in the
+     plan and decide whether to drop it before continuing — do not
+     just pretend the gripper is empty.
+
+   Also parse the task's main verb to confirm the inferred mode:
+   - "Pick up X and bring it to Y" / "Take X to Y" / "Grab X" → pick
+     is part of the task; the gripper should start empty.
+   - "Bring X to Y" / "Deliver X to Y" / "Move X to Y" → transport
+     verb; the user typically means the object is *already with the
+     robot* (or the user pre-positioned it). Combine with the
+     `/gripper/status` check: if attached, skip pick; if detached,
+     fall back to pick-then-place.
+
+   This prevents the orchestrator from re-grasping an object the
+   robot already holds, or from declaring a held shoe "missing"
+   because no shoe is on the floor anymore.
+
 1. **Write your plan as a table before any tool call.** Your first
    response must list every object the task mentions, with its pickup
    and place locations stripped of unreliable adjectives (see color

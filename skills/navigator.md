@@ -86,9 +86,21 @@ facing south-west toward the TV cabinet.
   of the living room (e.g. cricket ball near TV cabinet, drop into
   the south-wall trash bin).
 
-- **Bedroom (parents)** — `x=-3.82, y=0.49, yaw=2.87` (≈ 150°,
-  facing NW into the room). Large white bed, two nightstands,
-  reading desk and chair near the west wall, wardrobe.
+- **Living room (by other red shoe)** — `x=2.84, y=-3.87, yaw=0`
+  (≈ 0°, facing east). 1m west and 50cm north of the existing
+  red shoe at (3.84, -4.37). Use this when the task references the
+  "other red shoe" or asks to drop something next to it — the place
+  agent's forward drop (~0.5m forward of robot) will land at
+  ~(3.34, -3.87), 50cm west and 50cm north of the existing shoe.
+  This standoff prevents arm-planning failures from being too close
+  to the shoe / shoe rack / wall.
+
+- **Bedroom (parents)** — `x=-4.14, y=0.38, yaw=3.01` (≈ 172°,
+  facing west into the room). Robot stops deeper inside the bedroom
+  for better turn-around clearance — earlier (-3.82, 0.49) entry
+  was close to the doorway and made nav-out planning flaky.
+  Visible: large white bed, two nightstands, reading desk and chair
+  near the west wall, wardrobe.
 
 - **Kids room** — `x=-3.52, y=-3.28, yaw=-3.13` (≈ 176°, facing
   west). Wooden bunk-bed-style furniture in the SW corner, two

@@ -31,7 +31,7 @@ close, lift, return). Higher surfaces are out of scope.
 2. **Clear octomap** — `ros__call_service` with `service_name="/clear_octomap"`,
    `service_type="std_srvs/srv/Empty"`, `request={}`.
 
-2. **Segment the object — arm-cam first, front-cam fallback for distant targets:**
+3. **Segment the object — arm-cam first, front-cam fallback for distant targets:**
    a. First try `perception__segment_objects` with `prompt="<object_name>"`
       and `camera="arm"`. If `SUCCESS`: continue to step 4.
    b. If `NO_OBJECTS_FOUND`: the navigator handed off too far for arm-cam
@@ -47,7 +47,7 @@ close, lift, return). Higher surfaces are out of scope.
       geometry (which is what creep_closer's internal re-segment does
       automatically).
 
-3. **Compute grasp pose** — `perception__get_topdown_grasp_pose` with
+4. **Compute grasp pose** — `perception__get_topdown_grasp_pose` with
    `object_name="<object_name>"`. Returns a grasp pose in `base_footprint`
    frame with the 14cm gripper finger offset already applied.
 
@@ -87,9 +87,15 @@ close, lift, return). Higher surfaces are out of scope.
      **If `STATUS: TARGET_LOST`** (post-drive re-segment failed): the
      target may have fallen out of arm-cam FOV (too close, off-axis, or
      SAM3 missed). DO NOT call creep again immediately. Instead:
-     1. Call `perception__look(camera="arm")` to inspect what the arm
-        camera actually sees.
-     2. Reason on the image:
+     1. Try `perception__segment_objects` with `camera="front"` —
+        front-cam has wider FOV and sees the floor at robot height. If
+        SUCCESS: recompute grasp via `get_topdown_grasp_pose` (TF
+        transforms to base_footprint correctly regardless of source
+        camera). If the new grasp_x ≤ 1.10m, proceed to step 6.
+     2. If front-cam also returns NO_OBJECTS_FOUND, call
+        `perception__look(camera="arm")` to inspect what the arm camera
+        actually sees.
+     3. Reason on the image:
         - Target VISIBLE in image but SAM3 missed it → call
           `perception__segment_objects` again with a more specific
           prompt (e.g. `"small white cube on wooden floor"` instead of
@@ -98,9 +104,11 @@ close, lift, return). Higher surfaces are out of scope.
           → report FAILURE. Do not retry creep blindly — the navigator
           needs to handle this on the next attempt.
 
-     - Cap: up to 5 creeps total. If after 5 creeps grasp_x is still
-       > 0.95m but progress was steady, attempt the grasp anyway with
-       the latest pose.
+     - Cap: up to 3 creeps total. If after 3 creeps grasp_x is still
+       > 1.10m but progress was steady, attempt the grasp anyway with
+       the latest pose. More than 3 creeps just burns time without
+       improving position; a stuck robot needs the navigator, not more
+       creep calls.
 
 6. **Open gripper** — `ros__send_action_goal` with
    `action_name="/robotiq_gripper_controller/gripper_cmd"`,
