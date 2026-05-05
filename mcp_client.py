@@ -27,9 +27,15 @@ SERVER_SHORT_NAMES = {
 # triggering false timeouts that the agent then retries → 3+ wasted
 # 45s waits per failed nav. Bumped to 90s on 2026-05-04 so legit slow
 # nav succeeds first try; true hangs still bail in <2min.
+#
+# Bumped again to 180s on 2026-05-05 because Gazebo RTF was measured at
+# ~0.24 (gz-sim CPU-bound with GUI). Cross-house hops (~8m, e.g. bedroom
+# → living room) need ~100-150s wall-clock at that RTF. 180s budget
+# absorbs the slow path; true zombie goals still bail in 3min.
+# When/if RTF improves (close GUI, free cores), this can be tightened.
 DEFAULT_TOOL_TIMEOUT = 120
 SERVER_TOOL_TIMEOUTS = {
-    "nav2-mcp-server": 90,
+    "nav2-mcp-server": 180,
 }
 
 

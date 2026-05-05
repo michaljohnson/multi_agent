@@ -14,6 +14,21 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+_SKILL_FILE = Path(__file__).parent / "skills" / "navigator.md"
+
+NAVIGATOR_TOOLS = {
+    "moveit__plan_and_execute",
+    "nav2__navigate_to_pose",
+    "nav2__clear_costmaps",
+    "nav2__get_robot_pose",
+    "perception__look",
+}
+
+
+def _filter_tools(all_tools: list[dict]) -> list[dict]:
+    """Filter to only the tools the navigator needs."""
+    return [t for t in all_tools if t["function"]["name"] in NAVIGATOR_TOOLS]
+
 
 def _parse_robot_pose(raw) -> tuple[float | None, float | None, float | None]:
     """Extract (x, y, yaw) from nav2__get_robot_pose response. Returns
@@ -126,20 +141,8 @@ async def _approach_target(
         try:
             await asyncio.wait_for(
                 mcp.call_tool_prefixed(
-                    "ros__send_action_goal",
-                    {
-                        "action_name": "/drive_on_heading",
-                        "action_type": "nav2_msgs/action/DriveOnHeading",
-                        "goal": {
-                            "target": {"x": drive_dist, "y": 0.0, "z": 0.0},
-                            "speed": 0.3,
-                            "time_allowance": {
-                                "sec": int(drive_dist * 4 + 5),
-                                "nanosec": 0,
-                            },
-                        },
-                        "timeout": 30.0,
-                    },
+                    "nav2__drive_on_heading",
+                    {"distance": drive_dist, "speed": 0.3},
                 ),
                 timeout=35.0,
             )
@@ -208,20 +211,8 @@ async def _approach_target(
         try:
             await asyncio.wait_for(
                 mcp.call_tool_prefixed(
-                    "ros__send_action_goal",
-                    {
-                        "action_name": "/drive_on_heading",
-                        "action_type": "nav2_msgs/action/DriveOnHeading",
-                        "goal": {
-                            "target": {"x": drive_dist, "y": 0.0, "z": 0.0},
-                            "speed": 0.3,
-                            "time_allowance": {
-                                "sec": int(drive_dist * 4 + 5),
-                                "nanosec": 0,
-                            },
-                        },
-                        "timeout": 30.0,
-                    },
+                    "nav2__drive_on_heading",
+                    {"distance": drive_dist, "speed": 0.3},
                 ),
                 timeout=35.0,
             )
@@ -255,21 +246,6 @@ async def _approach_target(
         f"approached to ~{standoff_m:.2f}m standoff (hop was {hop_dist:.2f}m)",
         tool_calls,
     )
-
-_SKILL_FILE = Path(__file__).parent / "skills" / "navigator.md"
-
-NAVIGATOR_TOOLS = {
-    "moveit__plan_and_execute",
-    "nav2__navigate_to_pose",
-    "nav2__clear_costmaps",
-    "nav2__get_robot_pose",
-    "perception__look",
-}
-
-
-def _filter_tools(all_tools: list[dict]) -> list[dict]:
-    """Filter to only the tools the navigator needs."""
-    return [t for t in all_tools if t["function"]["name"] in NAVIGATOR_TOOLS]
 
 
 async def _wait_until_still(
@@ -470,22 +446,22 @@ async def _try_spin_search(
     """Post-process navigator result.
 
     Architectural contract (Giovanni-aligned, 2026-04-30): the navigator
-    is responsible only for landing the robot at a known map coordinate
-    AND ensuring the target is visible (front camera minimum, arm
-    camera ideal) at handoff. The drive-closer step is OWNED by the
-    navigator now does the approach (see _approach_target).
-    arm cam and approaches under their own control.
+    is responsible for landing the robot at a known map coordinate AND
+    ensuring the target is visible (front camera minimum, arm camera
+    ideal) at handoff. The drive-closer step is also owned by the
+    navigator (see ``_approach_target``); pick/place are pure
+    manipulation primitives once handoff completes.
 
     So the post-process is small:
-      - LLM SUCCESS → straight to verify gate (no drive-closer).
+      - LLM SUCCESS → straight to verify gate (no drive-closer here).
       - LLM FAILURE + Check 1 PASS (correct area, target not seen) →
         spin-search to bring it into view, then verify gate.
       - LLM FAILURE + Check 1 FAIL (wrong area) → return FAILURE; the
         orchestrator will replan navigation.
 
     The verify gate (``_final_verify_gate`` → ``_verify_target_visible``)
-    accepts SAM3 SUCCESS on either camera; navigator will approach on arm cam
-    from there.
+    accepts SAM3 SUCCESS on either camera; navigator approaches on arm
+    cam from there.
     """
     if not target_object:
         return result

@@ -88,7 +88,7 @@ facing south-west toward the TV cabinet.
 
 - **Living room (by other red shoe)** — `x=2.84, y=-3.87, yaw=0`
   (≈ 0°, facing east). 1m west and 50cm north of the existing
-  red shoe at (3.84, -4.37). Use this when the task references the
+  red shoe at (4.06, -3.61). Use this when the task references the
   "other red shoe" or asks to drop something next to it — the place
   agent's forward drop (~0.5m forward of robot) will land at
   ~(3.34, -3.87), 50cm west and 50cm north of the existing shoe.
@@ -125,8 +125,8 @@ prompt that works best.
 | Object | Position | Entry pose | Suggested prompt |
 |---|---|---|---|
 | Coke can | `(6.93, -2.97, 0.06)` — on the kitchen floor (south side, near doorway) | Kitchen (cooking) | `"coke can"` or `"red can on the floor"` |
-| Red shoe | `(-4.43, 0.76)` — bedroom floor, north side near the bed | Bedroom (parents) | `"red shoe"` |
-| White cube | `(-4.85, -2.98)` — kids room floor near the bunk bed | Kids room | `"white cube"` |
+| Red shoe | `(-4.90, 0.87)` — bedroom floor, north side near the bed | Bedroom (parents) | `"red shoe"` |
+| White cube | `(-5.50, -2.98)` — kids room floor near the bunk bed (10cm) | Kids room | `"white cube"` |
 
 
 ### Placeable locations
@@ -138,8 +138,8 @@ matches the task.
 | Location | Position | Entry pose | Notes |
 |---|---|---|---|
 | Wooden coffee table | `(1.50, 2.04, 0.33)` — living room | Living room (couch view) | Surface drop. ~0.45m high. |
-| Floor next to matching shoe | `(3.84, -4.37)` — living room east side, near shoe rack | Living room (TV view) | Floor drop. **Navigation landmark: `"shoe rack"`** (large, easy to segment) — the matching `LivingRoom_Shoe` is too small to use as the navigator's target_object from across the room. |
-| Brown trash bin (kids room) | `(-4.92, -4.85)` — SW corner of kids room | Kids room | Drop INTO container. Renamed from LivingRoom_Trash → `KidsRoom_Trash` 2026-05-02. |
+| Floor next to matching shoe | `(4.06, -3.61)` — living room east side, near shoe rack | Living room (TV view) | Floor drop. **Navigation landmark: `"shoe rack"`** (large, easy to segment) — the matching `LivingRoom_Shoe` is too small to use as the navigator's target_object from across the room. |
+| Brown trash bin (kids room) | `(-4.19, -1.56)` — kids room, mid-east | Kids room | Drop INTO container. Renamed from LivingRoom_Trash → `KidsRoom_Trash` 2026-05-02. |
 
 ### People in the scene (do NOT try to pick or interact)
 
