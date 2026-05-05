@@ -15,19 +15,22 @@ There are THREE placement modes. Pick the right one based on the task.
 
 - **Floor placement** (e.g. "drop on the floor next to X", "place on
   the floor by Y") — the navigator already positioned the robot at the
-  correct spot. NO segmentation needed. Use the **floor fast path**.
+  correct spot. NO segmentation needed. Use the **floor fast path**
+  below.
 
 - **Surface placement** (e.g. "place on the coffee table", "on the
-  counter", "on the shelf") — anything with a flat top to place ONTO.
-  Segment the surface FROM ABOVE using the arm camera (look_down_high)
-  so the segmented region's top-z is the actual surface. Use the
-  **surface — segment-from-above procedure** below.
+  counter") — anything with a flat top to place ONTO. Segment the
+  surface from the FRONT camera at `look_forward` (the held object is
+  in the gripper and would block the arm cam's view at look-down).
+  `get_topdown_placing_pose` is called with `object_height_m=<held
+  object height>` so the tool computes a wrist-z that lands the
+  released object at `surface + top_clearance_m`. Use the
+  **Unified procedure** below — it branches at step 5.
 
 - **Container** (bin, basket, bowl, drainer, wagon, box) — anything
   with a hollow opening to drop INTO. Stage 1 segments the container
-  from the front cam (navigator already delivered the robot to ~0.85m),
-  then drop with `top_clearance_m=0.35`. Use the **Container — full
-  procedure**.
+  from the front cam, drop with `top_clearance_m=0.35` and
+  `object_height_m=0` (default). Use the **Unified procedure** below.
 
 ## Floor placement — fast path (soft placement, not drop)
 
@@ -75,88 +78,7 @@ bottom touches the floor before release).
 
 That's it for floor placement. Skip everything below this section.
 
-## Surface placement — segment-from-above procedure (real-world generic)
-
-For a flat surface (table, counter, shelf), we need the actual TOP
-height of the surface. SAM3 from the FRONT camera at low angle
-segments the table EDGE (front face) — its max-z is the edge, not the
-top, leading to under-shoot drops. To get the real top height we MUST
-view the surface from ABOVE using the arm camera in `look_down_high`.
-
-**Procedure (mandatory steps — do not skip stage 2 even on planning hiccups):**
-
-1. **Move arm to look_down_high** (looks down at ~45°) —
-   `moveit__plan_and_execute` with `group="arm"`,
-   `target_type="named_state"`, `target={"state_name":"look_down_high"}`.
-   If named state fails, joint values:
-   `target_type="joint_state"`,
-   `target={"joint_positions":[0, -1.2, -0.5, -2.0, 1.5708, 0]}`.
-
-2. **Clear octomap** — `ros__call_service` on `/clear_octomap`
-   with `std_srvs/srv/Empty`, `request={}`.
-
-3. **Segment surface from arm camera (top view)** —
-   `perception__segment_objects` with `prompt="<surface_name>"`,
-   `camera="arm"`. The arm cam is now looking down at the surface
-   from above, so SAM3 gets the actual top.
-   - On `NO_OBJECTS_FOUND`: try a geometric prompt (e.g.
-     `"flat wooden surface"`, `"low brown rectangle"`). If that
-     also fails (3 prompts), the navigator handed off too far —
-     report FAILURE.
-
-4. **Compute surface drop pose** —
-   `perception__get_topdown_placing_pose` with `object_name="<surface_name>"`,
-   `top_clearance_m=0.20`. The returned `surface_centroid.z` is the
-   real surface height. The returned `place_pose.z = surface_z + 0.20`
-   is your initial pre-place pose (gripper 20cm above the surface).
-   READ both values — you'll need them.
-
-5. **Reach check on the surface drop pose** —
-   `dist = sqrt(cx² + cy²)` where (cx, cy) is `surface_centroid.x/y`.
-   - If `dist > 1.10m`: report FAILURE. Place does NOT drive the base
-     — that's the navigator's job. Navigator delivers to ~0.85m
-     standoff; with nav2's xy_goal_tolerance the actual standoff is
-     usually 0.85-1.05m. The 1.10m threshold matches pick.md's reach
-     (UR5 practical max). If dist > 1.10m, either segmentation
-     latched onto the wrong target or navigator drift. Orchestrator
-     will re-call navigate.
-   - If `dist <= 1.10m`: continue.
-
-6. **Move arm above drop spot** — `plan_and_execute` to
-   `[cx, cy, surface_z + 0.20]` in `base_footprint`,
-   `orientation=[1,0,0,0]`.
-
-7. **Lower to surface (soft contact)** — `plan_and_execute` to
-   `[cx, cy, descend_z]` where:
-   `descend_z = surface_z + 0.14 + (object_height / 2)`
-   The 0.14 is the gripper finger offset (wrist → fingertips). The
-   object centroid sits at fingertip level, so we add half the
-   object's height to get the wrist position that lands the object's
-   bottom on the surface.
-   Object height estimates (approximate, override if you know better):
-   - coke can ≈ 0.12m → `descend_z = surface_z + 0.20`
-   - cube ≈ 0.05m → `descend_z = surface_z + 0.165`
-   - shoe ≈ 0.10m → `descend_z = surface_z + 0.19`
-   - unknown small object → use `0.04` for half-height (safe default)
-
-8. **Open gripper** — `gripper_cmd` with `position=0.0`.
-
-9. **Force-detach** — `ros__publish_once` on `/gripper/force_detach_str`
-   with `msg_type="std_msgs/msg/String"`, `msg={"data":"release"}`.
-
-10. **Lift clear** — `plan_and_execute` to
-    `[cx, cy, surface_z + 0.40]` (well above the surface).
-
-11. **Return to look_forward** — `plan_and_execute` to named_state
-    `"look_forward"`.
-
-12. **Report SUCCESS**.
-
-That's it. Skip the Container procedure below.
-
-## Container — full procedure
-
-## Procedure (two-stage, arm camera only)
+## Unified procedure (surface + container)
 
 **Scope reduction (2026-05-02):** place targets are floor reference
 points OR wide containers (e.g. trash bin). Higher surfaces (kitchen
@@ -181,7 +103,7 @@ lower band. Both visible.
    `service_name="/clear_octomap"`, `service_type="std_srvs/srv/Empty"`,
    `request={}`.
 
-3. **Stage 1 — Coarse from FRONT camera (NOT arm — see below):**
+3. **Stage 1 — Coarse from FRONT camera:**
    At standoff the held object hangs in front of the arm cam AND
    tall containers extend above the arm-cam frame. Front cam has the
    wider FOV needed to see both the held object AND the full target
@@ -189,23 +111,51 @@ lower band. Both visible.
    a. `perception__segment_objects` with `prompt="<target>"`,
       `camera="front"`.
       - On `SUCCESS`: continue to 3b.
-      - On `NO_OBJECTS_FOUND`: try a GEOMETRIC descriptor (SAM3 often
+      - On `NO_OBJECTS_FOUND`: try a GEOMETRIC descriptor. SAM3 often
         misses category labels but anchors on shape + color +
-        location). Examples:
+        material. Examples:
         * trash bin → `"tall brown cylinder on the floor"`
-        * coffee table → `"low wooden surface in the living room"`
+        * coffee table → `"wooden surface"` (validated 2026-05-05 —
+          the literal phrase that works when "coffee table" /
+          "wooden coffee table" both fail)
         * shoe-rack reference → `"red shoe on the floor"`
-      - If geometric descriptor also fails (3 prompts total): report
-        FAILURE — the navigator contract guarantees visibility, so
-        the handoff was wrong.
-   b. `perception__get_topdown_placing_pose` with
-      `object_name="<target>"`,
-      `top_clearance_m=<0.35 for container, 0.20 for surface>`.
+      - If 3 prompts fail: report FAILURE — the navigator contract
+        guarantees visibility, so the handoff was wrong.
+   b. `perception__get_topdown_placing_pose` with arguments per mode:
+
+      **Surface mode** (table/counter/shelf):
+      ```
+      object_name = "<target surface>"
+      top_clearance_m = 0.05      # air gap above surface at release
+      object_height_m = <held object's height — see table below>
+      pointcloud_topic = "/front/segmented_pointcloud"
+      ```
+      The tool computes `wrist_z = surface + 0.14 (finger) +
+      object_height_m + 0.05`, so the released object lands ~5cm
+      above the surface and falls cleanly.
+
+      **Container mode** (bin/basket/bowl):
+      ```
+      object_name = "<target container>"
+      top_clearance_m = 0.35      # wrist above container rim
+      object_height_m = 0          # default — container drop ignores object dims
+      pointcloud_topic = "/front/segmented_pointcloud"
+      ```
+      Wrist sits 35cm above container rim; object falls in.
+
+      **Held-object height table** (use these unless you know better):
+      | Object | object_height_m |
+      |---|---|
+      | coke can | 0.12 |
+      | white cube (small) | 0.05 |
+      | shoe | 0.10 |
+      | small ball | 0.06 |
+      | unknown small object | 0.10 (safe default) |
+
       Take `coarse = (cx, cy, surface_height_m)` from the response.
-      Front-cam pointcloud gives accurate xy and the top of the
-      segmented region. Note: `cx, cy` may be biased toward the
-      target's front face (you're seeing it horizontally) — that's
-      fine for now; stage 2 (arm-cam from above) will refine.
+      Note: `cx, cy` may be biased toward the target's front face
+      (you're seeing it horizontally) — that's fine for now; stage 2
+      (arm-cam from above) refines for containers only.
 
 4. **Reach check on coarse xy.** `dist = sqrt(cx² + cy²)`.
    - If `dist > 0.65m`: report FAILURE. Place does NOT drive the base
@@ -220,15 +170,14 @@ lower band. Both visible.
 5. **Branch on target type.**
 
    **5-SURFACE (table, counter, shelf, desk): SKIP stage 2.**
-   The stage-1 `place_pose` IS the final drop pose. Go directly to
-   step 7. Do NOT move the arm to
-   a look-down intermediate pose; do NOT re-segment from above. SAM3
-   does not reliably segment a flat wooden/laminate surface from a
-   top-down view (no object features to lock onto), so re-segmenting
-   here always fails — and the raw-depth fallback can also stall on
-   the arm-camera depth topic. Stage 1 already gave you the surface
-   top height (`surface_height_m`) from the horizontal view, which is
-   accurate. Just execute the pose.
+   The stage-1 `place_pose` from step 3b IS the final drop pose. Do
+   NOT move the arm to a look-down intermediate pose; do NOT
+   re-segment from above. SAM3 does not reliably segment a flat
+   wooden/laminate surface top-down (no object features to lock
+   onto), and the held object would intrude on the arm-cam FOV from
+   that pose. Stage 1 already gave you the surface top height
+   (`surface_height_m`) and the corrected wrist-z (via
+   `object_height_m`). Skip directly to step 7 (Execute drop).
 
    **5-CONTAINER (bin, basket, bowl, drainer, wagon, box):**
    continue to step 6 — the rim center needs refinement because
@@ -260,22 +209,48 @@ lower band. Both visible.
       `use_cached=False` here — the raw-depth read from
       `/arm_camera/points` can stall and is not currently reliable.
 
-7. **Execute drop pose:**
+7. **Pre-place pose (above the drop spot — forces top-down approach):**
    `moveit__plan_and_execute` with `group="arm"`, `target_type="pose"`,
-   `target=<final place_pose from step 5-SURFACE or step 6>`. The
-   place_pose already includes the gripper finger offset and clearance
-   — do NOT add further vertical offset.
+   `target={"position":[place_pose.x, place_pose.y, place_pose.z + 0.15],
+   "orientation":[1,0,0,0], "frame_id":"base_footprint"}`.
 
-8. **Force-detach** — `ros__publish_once` with
+   **Why pre-place 15cm above:** `plan_and_execute(pose)` constrains
+   only the FINAL pose, not the trajectory. Without pre-place, MoveIt
+   may swing the held object horizontally toward the target — held
+   object hits the surface or container rim. Pre-place above forces
+   MoveIt to first lift the wrist over the target, then descent (step 8)
+   approaches straight down.
+
+   **If this plan fails** with `dist > UR5_reach_at_high_z`: the
+   target is just past the arm's vertical envelope at this z. Try
+   one recovery: `clear_planning_scene` then retry. If still fails,
+   report FAILURE — orchestrator will re-call navigate to bring the
+   robot a few cm closer.
+
+8. **Execute drop pose (descend straight down):**
+   `moveit__plan_and_execute` with `group="arm"`, `target_type="pose"`,
+   `target=<place_pose from step 3b or step 6>`. The place_pose
+   already includes the gripper finger offset, object height
+   (surface mode), and clearance — do NOT add further vertical
+   offset. The descent is small (~15cm) since pre-place already
+   positioned the wrist over the target.
+
+9. **Force-detach** — `ros__publish_once` with
    `topic="/gripper/force_detach_str"`, `msg_type="std_msgs/msg/String"`,
    `msg={"data":"release"}`.
 
-9. **Open gripper** — `ros__send_action_goal` with
-   `action_name="/robotiq_gripper_controller/gripper_cmd"`,
-   `action_type="control_msgs/action/GripperCommand"`,
-   `goal={"command":{"position":0.0,"max_effort":50.0}}`.
+10. **Open gripper** — `ros__send_action_goal` with
+    `action_name="/robotiq_gripper_controller/gripper_cmd"`,
+    `action_type="control_msgs/action/GripperCommand"`,
+    `goal={"command":{"position":0.0,"max_effort":50.0}}`.
 
-10. **Return to look_forward** — `moveit__plan_and_execute` with
+11. **Lift clear (retract upward before transit):**
+    `moveit__plan_and_execute` to
+    `[place_pose.x, place_pose.y, place_pose.z + 0.15]` —
+    same xy, z bumped 15cm. Avoids dragging the gripper across the
+    just-released object on the way to look_forward.
+
+12. **Return to look_forward** — `moveit__plan_and_execute` with
     `group="arm"`, `target_type="named_state"`,
     `target={"state_name":"look_forward"}`. If named state fails, use
     joint values: `target_type="joint_state"`,
@@ -290,16 +265,26 @@ lower band. Both visible.
   wrong and contradicted the procedure.
 - For SURFACES: stage 1 only — never move arm to a look-down pose,
   never re-segment from above. SAM3 doesn't recognize bare surfaces
-  top-down, so this path always fails.
+  top-down, AND the held object intrudes on the arm-cam FOV from
+  that pose, polluting the mask.
 - For CONTAINERS: stage 1 + stage 2 (look-down + re-segment). Stage 2
   corrects the front-face bias on cx,cy. If stage-2 SAM3 fails, fall
   back to stage 1's pose rather than raw-depth.
-- `top_clearance_m`: `0.35` for containers (drop-INTO from height),
-  `0.20` for surfaces (place-ONTO with safe gripper clearance).
+- **`get_topdown_placing_pose` parameters by mode:**
+  - Surface: `top_clearance_m=0.05` + `object_height_m=<held height>`.
+    Tool computes `wrist_z = surface + 0.14 (finger) + object_height
+    + 0.05`. Released object lands ~5cm above surface.
+  - Container: `top_clearance_m=0.35`, `object_height_m=0` (default).
+    Wrist sits 35cm above container rim; object falls in.
 - The `place_pose` returned by `get_topdown_placing_pose` ALREADY
-  includes the vertical clearance. Do NOT add more — sending a pose
-  with a hand-added offset will cause a collision (too low) or an
-  unreachable high pose (too high).
+  includes the gripper finger offset, object height (surface mode),
+  and clearance. Do NOT add more — sending a pose with a hand-added
+  offset will cause a collision (too low) or an unreachable pose
+  (too high).
+- **Top-down approach is enforced by the pre-place + descent split**
+  (step 7 + step 8). DO NOT plan directly to `place_pose` without
+  the pre-place — the held object may swing horizontally into the
+  target during the swing.
 - FRAME: Always use `base_footprint`, NEVER `odom` or `map`.
 - ORIENTATION: Always use quaternion `[1,0,0,0]` for top-down approach
   (w, x, y, z).
