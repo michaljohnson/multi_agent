@@ -154,12 +154,13 @@ into the right area; the deterministic post-step handles the rest.
 The post-step runs one of two flows depending on what you reported:
 
 - **You reported SUCCESS** (you saw the target object OR the area
-  landmarks clearly match): the post-step segments the target on
-  the front camera and drives in to ~1.5m standoff. **NO spinning** —
-  spinning happens only when the target is missing. If SAM3 can't
-  lock on a small/distant object from the entry pose, that's fine —
-  the pick agent's arm camera + creep_closer handles the final
-  approach.
+  landmarks clearly match): the post-step segments the target on the
+  front camera and drives in to **~0.85m standoff** (close enough that
+  the pick/place agent can grasp directly without driving the base).
+  **NO spinning** — spinning happens only when the target is missing.
+  Pick/place are pure manipulation agents; if the navigator can't get
+  to ~0.85m, the manipulation step will FAIL and the orchestrator
+  will re-call navigate.
 
 - **You reported FAILURE** (the area looked wrong): the post-step
   triggers a deterministic spin-search — up to 8 × 60° rotations
@@ -264,8 +265,18 @@ approach + spin-search.
 
 ## Retry rules
 
-- If nav2 fails or times out: call nav2__clear_costmaps ONCE, then retry the
-  same navigation target ONE more time. That is your only allowed retry.
+- If nav2 fails outright (clear error response): call nav2__clear_costmaps
+  ONCE, then retry the same navigation target ONE more time.
+- **If nav2 TIMES OUT** (`Timed out while waiting for response to ClientRequest`):
+  do NOT retry. nav2 likely IS moving the robot — the action succeeded
+  server-side but the client timeout fired before the result propagated.
+  Skip clear_costmaps. Skip the retry. Go directly to your `look()` step
+  and check where you actually ended up. If the look shows you arrived,
+  treat the nav as effectively succeeded. If clearly elsewhere, you may
+  do ONE retry — but most timeouts mean the robot got there.
+  Reason: each timeout = 90s of dead waiting. Retries usually time out
+  too. Wasted 3+ minutes of nav for a robot that was already at the
+  target after the first attempt.
 - If verification fails and no approach_pose was given: you may try ONE
   alternative navigation target based on updated spatial reasoning. Maximum
   2 total navigation attempts.

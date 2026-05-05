@@ -25,8 +25,9 @@ There are THREE placement modes. Pick the right one based on the task.
 
 - **Container** (bin, basket, bowl, drainer, wagon, box) — anything
   with a hollow opening to drop INTO. Stage 1 segments the container
-  from the front cam (coarse), creep brings robot close, then drop
-  with `top_clearance_m=0.35`. Use the **Container — full procedure**.
+  from the front cam (navigator already delivered the robot to ~0.85m),
+  then drop with `top_clearance_m=0.35`. Use the **Container — full
+  procedure**.
 
 ## Floor placement — fast path (soft placement, not drop)
 
@@ -112,12 +113,14 @@ view the surface from ABOVE using the arm camera in `look_down_high`.
 
 5. **Reach check on the surface drop pose** —
    `dist = sqrt(cx² + cy²)` where (cx, cy) is `surface_centroid.x/y`.
-   - If `dist > 0.65m`: call `creep_closer(target_container=<surface>,
-     current_target_x=cx, current_target_y=cy, top_clearance_m=0.20)`.
-     After creep, parse the new drop pose from its return text and
-     re-check distance. (Standard creep loop — see Container procedure
-     for retry rules.)
-   - If `dist <= 0.65m`: continue.
+   - If `dist > 1.10m`: report FAILURE. Place does NOT drive the base
+     — that's the navigator's job. Navigator delivers to ~0.85m
+     standoff; with nav2's xy_goal_tolerance the actual standoff is
+     usually 0.85-1.05m. The 1.10m threshold matches pick.md's reach
+     (UR5 practical max). If dist > 1.10m, either segmentation
+     latched onto the wrong target or navigator drift. Orchestrator
+     will re-call navigate.
+   - If `dist <= 1.10m`: continue.
 
 6. **Move arm above drop spot** — `plan_and_execute` to
    `[cx, cy, surface_z + 0.20]` in `base_footprint`,
@@ -195,48 +198,30 @@ lower band. Both visible.
       - If geometric descriptor also fails (3 prompts total): report
         FAILURE — the navigator contract guarantees visibility, so
         the handoff was wrong.
-   b. `perception__get_topdown_placing_pose` with `object_name="<target>"`
-      and `top_clearance_m=<0.35 for container, 0.20 for surface>`.
-      Front-cam pointcloud gives accurate xy and the top of the
-      segmented region. Stage 2 (arm-cam from above) will refine.
    b. `perception__get_topdown_placing_pose` with
       `object_name="<target>"`,
       `top_clearance_m=<0.35 for container, 0.20 for surface>`.
       Take `coarse = (cx, cy, surface_height_m)` from the response.
-      Note: `cx, cy` may be biased toward the target's front face
-      (you're seeing it horizontally) — that's fine for now; stage 2
-      will refine.
+      Front-cam pointcloud gives accurate xy and the top of the
+      segmented region. Note: `cx, cy` may be biased toward the
+      target's front face (you're seeing it horizontally) — that's
+      fine for now; stage 2 (arm-cam from above) will refine.
 
 4. **Reach check on coarse xy.** `dist = sqrt(cx² + cy²)`.
-   - If `dist > 0.65m`: call `creep_closer(target_container=<target>,
-     current_target_x=cx, current_target_y=cy,
-     top_clearance_m=<0.35 or 0.20>)`.
-     **CRITICAL — after creep returns:** parse the `--- drop pose ---`
-     JSON in its return text and READ the NEW `surface_centroid.x` /
-     `surface_centroid.y`. Re-compute `dist` from THOSE new coords.
-     - If new `dist <= 0.65m`: proceed to step 5.
-     - If new `dist > 0.65m` AND it dropped by >=5cm vs the previous
-       value: call creep AGAIN with the NEW (cx, cy). Never pass stale
-       coords twice in a row.
-     - If new `dist` did NOT drop by >=5cm vs the previous value:
-       the robot is stuck (nav2 hop didn't translate to actual base
-       motion, or perception is jittering). Try ONE more creep —
-       if it still doesn't make >=5cm progress, report FAILURE.
-     - Cap: up to 5 creeps total per place. If after 5 creeps `dist`
-       is still > 0.65m but progress was steady, proceed to step 5
-       anyway with the latest pose — do NOT auto-fail just because
-       you hit the count.
+   - If `dist > 0.65m`: report FAILURE. Place does NOT drive the base
+     — that's the navigator's job. Navigator was supposed to deliver
+     the robot to ~0.85m standoff; if dist came back > 0.65m, either
+     the segmentation latched onto the wrong target or navigator's
+     approach failed. Orchestrator will re-call navigate.
    - If `dist <= 0.65m`: proceed to step 5.
 
-   The `place_pose` you carry forward to step 5 is whichever was
-   computed most recently (stage 1 if no creep, or the latest
-   creep's `--- drop pose ---` if creeps happened).
+   The `place_pose` you carry forward to step 5 is the stage-1 result.
 
 5. **Branch on target type.**
 
    **5-SURFACE (table, counter, shelf, desk): SKIP stage 2.**
-   The stage-1 `place_pose` (or the latest creep's `place_pose`) IS
-   the final drop pose. Go directly to step 7. Do NOT move the arm to
+   The stage-1 `place_pose` IS the final drop pose. Go directly to
+   step 7. Do NOT move the arm to
    a look-down intermediate pose; do NOT re-segment from above. SAM3
    does not reliably segment a flat wooden/laminate surface from a
    top-down view (no object features to lock onto), so re-segmenting
@@ -270,7 +255,7 @@ lower band. Both visible.
 
    c. **Fallback — use stage 1's pose:** if SAM3 cannot find the
       container from above, accept the slight front-face bias and
-      use the stage-1 (or latest-creep) `place_pose` as the final
+      use the stage-1 `place_pose` as the final
       drop pose. Do NOT call `get_topdown_placing_pose` with
       `use_cached=False` here — the raw-depth read from
       `/arm_camera/points` can stall and is not currently reliable.
@@ -298,8 +283,11 @@ lower band. Both visible.
 
 ## Critical rules
 
-- The arm camera is the ONLY camera used for placing. Do NOT call
-  `segment_objects` with `camera="front"`.
+- Stage 1 (coarse target lookup) uses the FRONT camera — at standoff
+  the held object hangs in front of the arm cam AND tall containers
+  extend above the arm-cam frame. Stage 2 (container refine) uses
+  the ARM camera from above. The earlier "arm-cam only" rule was
+  wrong and contradicted the procedure.
 - For SURFACES: stage 1 only — never move arm to a look-down pose,
   never re-segment from above. SAM3 doesn't recognize bare surfaces
   top-down, so this path always fails.

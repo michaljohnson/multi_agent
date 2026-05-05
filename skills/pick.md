@@ -41,11 +41,11 @@ close, lift, return). Higher surfaces are out of scope.
       primes the segmentation cache with the cube's location for
       `get_topdown_grasp_pose` (which works regardless of source camera —
       TF transforms to base_footprint correctly).
-   c. After creep_closer brings the robot within ~1m of the target,
-      ALWAYS re-segment with `camera="arm"` — the front-cam pose was
-      only a coarse approach hint, the actual grasp must use arm-cam
-      geometry (which is what creep_closer's internal re-segment does
-      automatically).
+   c. After the navigator's approach delivers the robot to ~0.85m from
+      the target, the arm camera should see the target clearly. If you
+      had to fall back to the front camera, it's still fine — the
+      cached pointcloud is in camera-optical frame and `get_topdown_grasp_pose`
+      transforms to base_footprint correctly via TF.
 
 4. **Compute grasp pose** — `perception__get_topdown_grasp_pose` with
    `object_name="<object_name>"`. Returns a grasp pose in `base_footprint`
@@ -63,52 +63,25 @@ close, lift, return). Higher surfaces are out of scope.
      FAILURE — the object may not be reachably segmentable from this pose.
 
 5. **Reach check.** The UR5 arm reaches about **1.10m** forward from
-   `base_footprint` (nominal spec is 0.85m; with full joint extension and
-   MoveIt's planning tolerance it reaches ~1.10m). Look at the grasp pose
-   `position[0]` (x):
-   - If x ≤ 1.10m → continue to step 6 (try the grasp; MoveIt will fail
-     fast if the pose is genuinely unreachable, in which case go back to
-     creep).
-   - If x > 1.10m → call `creep_closer(object_name, current_grasp_x)`.
-     This drives the base forward, re-segments, and recomputes the grasp.
-     The creep return text starts with `STATUS: TARGET_VISIBLE` (success)
-     or `STATUS: TARGET_LOST` (re-segment failed after drive).
+   `base_footprint`. Look at the grasp pose `position[0]` (x):
+   - If x ≤ 1.10m → continue to step 6 (try the grasp; MoveIt may need
+     a retry or two — see the recovery rule below).
+   - If x > 1.10m → report FAILURE immediately. **Pick does NOT drive
+     the base** — that's the navigator's job. The navigator already
+     delivered the robot to ~0.85m standoff before handing off to pick;
+     if x came back > 1.10m, either segmentation latched onto the wrong
+     object or the navigator's approach failed. Either way, the
+     orchestrator will re-call navigate before the next pick attempt.
+     Reporting FAILURE here is the correct, honest behavior.
 
-     **If `STATUS: TARGET_VISIBLE`:**
-     - Read the new grasp_x from the `--- grasp ---` block in the output.
-     - If new grasp_x ≤ 1.10m: proceed to step 6.
-     - If new grasp_x > 1.10m AND it dropped by ≥5cm vs the previous
-       value: call creep AGAIN with the new grasp_x. Don't pass stale
-       grasp_x.
-     - If new grasp_x did NOT drop by ≥5cm vs the previous value, OR
-       the creep return contains "nav2 hop timed out": robot is stuck.
-       Report FAILURE — do NOT keep creeping.
-
-     **If `STATUS: TARGET_LOST`** (post-drive re-segment failed): the
-     target may have fallen out of arm-cam FOV (too close, off-axis, or
-     SAM3 missed). DO NOT call creep again immediately. Instead:
-     1. Try `perception__segment_objects` with `camera="front"` —
-        front-cam has wider FOV and sees the floor at robot height. If
-        SUCCESS: recompute grasp via `get_topdown_grasp_pose` (TF
-        transforms to base_footprint correctly regardless of source
-        camera). If the new grasp_x ≤ 1.10m, proceed to step 6.
-     2. If front-cam also returns NO_OBJECTS_FOUND, call
-        `perception__look(camera="arm")` to inspect what the arm camera
-        actually sees.
-     3. Reason on the image:
-        - Target VISIBLE in image but SAM3 missed it → call
-          `perception__segment_objects` again with a more specific
-          prompt (e.g. `"small white cube on wooden floor"` instead of
-          `"cube"`). Then go back to step 4.
-        - Target NOT VISIBLE in image (out of FOV or behind something)
-          → report FAILURE. Do not retry creep blindly — the navigator
-          needs to handle this on the next attempt.
-
-     - Cap: up to 3 creeps total. If after 3 creeps grasp_x is still
-       > 1.10m but progress was steady, attempt the grasp anyway with
-       the latest pose. More than 3 creeps just burns time without
-       improving position; a stuck robot needs the navigator, not more
-       creep calls.
+   **If MoveIt's pre-grasp plan_and_execute fails on a reachable pose**
+   (x ≤ 1.10m): MoveIt's plan-pose path is known to be flaky (per
+   `feedback_plan_pose_unreliable.md`). Recovery:
+   - Retry the same pose ONCE after `moveit__clear_planning_scene`.
+   - If still fails, re-segment (clear_octomap → segment_objects(arm) →
+     get_topdown_grasp_pose) — the cache may have stale TF — then retry
+     the pre-grasp.
+   - If still fails after re-segment, report FAILURE.
 
 6. **Open gripper** — `ros__send_action_goal` with
    `action_name="/robotiq_gripper_controller/gripper_cmd"`,
@@ -192,11 +165,14 @@ close, lift, return). Higher surfaces are out of scope.
   `segment_objects(camera="arm")` + `get_topdown_grasp_pose` to refresh
   the cache, THEN retry the pre-grasp with the fresh values.
 - Do NOT call `get_topdown_grasp_pose` a second time after moving the
-  arm. The cached pointcloud becomes stale. Reuse the grasp pose from
-  the first call. (The `creep_closer` helper is the only sanctioned way
-  to refresh the grasp.)
+  arm WITHOUT re-running `segment_objects` first. The cached pointcloud
+  becomes stale. Refresh via clear_octomap → segment_objects(arm) →
+  get_topdown_grasp_pose, THEN use the fresh pose.
 - Do NOT try intermediate "stepping stone" arm positions to gradually
-  reach a far target. Use `creep_closer` instead.
+  reach a far target. If x > 1.10m, report FAILURE — the navigator
+  must redeliver the robot.
+- Pick does NOT drive the base. If the grasp pose is unreachable,
+  report FAILURE. The orchestrator will call navigate again.
 - Report FAILURE honestly. Do NOT report SUCCESS unless the object was
   actually grasped and lifted. A false success is worse than a failure.
 - SUCCESS must be gated on step 10 (`/gripper/status` says
