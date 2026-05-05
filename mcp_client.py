@@ -21,12 +21,15 @@ SERVER_SHORT_NAMES = {
     "perception-mcp-server": "perception",
 }
 
-# Per-server tool-call timeout (seconds). nav2 short-circuits the
-# zombie-goal hang where the server-side action stays alive but the
-# client never gets a response.
+# Per-server tool-call timeout (seconds). nav2 was originally capped
+# tight at 45s to short-circuit zombie-goal hangs, but in practice nav2
+# BT recovery loops + slow sim push legitimate navigates past 45s,
+# triggering false timeouts that the agent then retries → 3+ wasted
+# 45s waits per failed nav. Bumped to 90s on 2026-05-04 so legit slow
+# nav succeeds first try; true hangs still bail in <2min.
 DEFAULT_TOOL_TIMEOUT = 120
 SERVER_TOOL_TIMEOUTS = {
-    "nav2-mcp-server": 45,
+    "nav2-mcp-server": 90,
 }
 
 
