@@ -47,6 +47,26 @@ def _parse_robot_pose(raw) -> tuple[float | None, float | None, float | None]:
         return None, None, None
 
 
+# Mode-aware standoff lookup. The right standoff depends on what the
+# next agent will do once handoff completes:
+#   - pick: UR5 reaches forward at low z (~0.40m) — 0.85m centroid
+#     distance leaves comfortable headroom for grasp pose math.
+#   - surface_place: wrist must be HIGH (surface_z + 0.31m for can on
+#     coffee table = 0.66m). UR5 top-down reach at z=0.66m caps at
+#     x≈0.55m, so navigator needs to deliver closer (~0.45m). See
+#     feedback_creeper_standoff_per_mode.md.
+#   - container_place: drop INTO the bin from above; wrist sits 35cm
+#     above rim. Same UR5 high-z constraints apply but the rim is
+#     usually at moderate height, so 0.65m gives margin.
+#   - floor_place: similar to pick — soft set-down at low z.
+_STANDOFF_BY_MODE = {
+    "pick": 0.85,
+    "surface_place": 0.45,
+    "container_place": 0.65,
+    "floor_place": 0.85,
+}
+
+
 async def _approach_target(
     mcp: MCPClient,
     target_object: str,
@@ -441,7 +461,10 @@ async def _verify_target_visible(
 
 
 async def _try_spin_search(
-    mcp: MCPClient, target_object: str | None, result: dict
+    mcp: MCPClient,
+    target_object: str | None,
+    result: dict,
+    standoff_m: float = 0.85,
 ) -> dict:
     """Post-process navigator result.
 
@@ -470,7 +493,7 @@ async def _try_spin_search(
         logger.info(
             f"  LLM saw '{target_object}' via look() — going to verify gate"
         )
-        return await _final_verify_gate(mcp, target_object, result)
+        return await _final_verify_gate(mcp, target_object, result, standoff_m=standoff_m)
 
     # LLM did not see the target. Three failure modes:
     #   - Check 1 explicitly FAIL: wrong area / never reached destination.
@@ -516,13 +539,14 @@ async def _try_spin_search(
             f"Found '{target_object}' after spin-search. "
             f"Scene: {scene_text[:400] if scene_text else 'N/A'}"
         )
-    return await _final_verify_gate(mcp, target_object, result)
+    return await _final_verify_gate(mcp, target_object, result, standoff_m=standoff_m)
 
 
 async def _final_verify_gate(
     mcp: MCPClient,
     target_object: str,
     result: dict,
+    standoff_m: float = 0.85,
 ) -> dict:
     """Hard gate: a navigator result with success=True is only accepted if
     SAM3 can still segment the target on front or arm camera *right now*.
@@ -531,18 +555,25 @@ async def _final_verify_gate(
     contract: the target MUST be SAM3-segmentable at handoff. If both
     cameras + a recovery spin-search miss, success is overturned to
     FAILURE — even when the LLM's look() said it saw the target.
+
+    Args:
+        standoff_m: Target distance (meters) from segmented target after
+            the approach hop. Default 0.85m for pick. Surface place
+            should pass 0.45m, container place 0.65m. See
+            _STANDOFF_BY_MODE for the mode → standoff mapping.
     """
     if not result.get("success"):
         return result
     visible, info, calls = await _verify_target_visible(mcp, target_object)
     result["tool_calls_used"] += calls
     if visible:
-        # Now drive to within ~0.85m of the target so pick/place can grasp
-        # directly without their own creep step. This was previously each
-        # manipulation agent's responsibility (pick/place._creep_closer);
-        # consolidating it here makes pick/place pure manipulation.
+        # Drive to within `standoff_m` of the target so pick/place can
+        # grasp/release directly without their own creep step. This was
+        # previously each manipulation agent's responsibility
+        # (pick/place._creep_closer); consolidating it here makes
+        # pick/place pure manipulation.
         approach_ok, approach_info, approach_calls = await _approach_target(
-            mcp, target_object, standoff_m=0.85
+            mcp, target_object, standoff_m=standoff_m
         )
         result["tool_calls_used"] += approach_calls
         result["reason"] = (
@@ -573,6 +604,7 @@ async def execute_navigate(
     destination: str,
     target_object: str | None = None,
     approach_pose: tuple[float, float, float] | None = None,
+    mode: str = "pick",
     model: str = None,
     max_tool_calls: int = 15,
 ) -> dict:
@@ -587,12 +619,23 @@ async def execute_navigate(
         approach_pose: Optional (x, y, yaw) in the map frame. If provided,
                        the navigator drives directly to this pose. If not,
                        the navigator reasons about where to go.
+        mode: What the next agent will do. Determines `_approach_target`
+              standoff via _STANDOFF_BY_MODE lookup. Valid values:
+              'pick' (0.85m), 'surface_place' (0.45m),
+              'container_place' (0.65m), 'floor_place' (0.85m).
+              Default 'pick' preserves legacy behavior.
         model: LiteLLM model string. Defaults to LLM_MODEL env var.
         max_tool_calls: Safety cap on tool calls.
 
     Returns:
         {"success": bool, "reason": str, "tool_calls_used": int}
     """
+    standoff_m = _STANDOFF_BY_MODE.get(mode, 0.85)
+    if mode not in _STANDOFF_BY_MODE:
+        logger.warning(
+            f"Unknown navigator mode '{mode}'; falling back to 0.85m standoff"
+        )
+
     all_tools = mcp.get_tools()
     tools = _filter_tools(all_tools)
 
@@ -677,7 +720,7 @@ async def execute_navigate(
                 "reason": final_text,
                 "tool_calls_used": tool_call_count,
             }
-            return await _try_spin_search(mcp, target_object, result)
+            return await _try_spin_search(mcp, target_object, result, standoff_m=standoff_m)
         else:
             stop = response.choices[0].finish_reason
             logger.warning(f"Unexpected finish_reason: {stop}")

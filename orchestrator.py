@@ -26,8 +26,12 @@ ORCHESTRATOR_TOOLS = [
                 "Navigate the robot to a destination. Spawns a navigator agent "
                 "that uses its own environment knowledge to drive there and "
                 "verifies arrival using perception. If target_object is given, "
-                "the navigator also closes to ~1m standoff from that object so "
-                "the next step (pick or place) starts within camera range."
+                "the navigator also closes to a mode-dependent standoff from "
+                "that object so the next step (pick or place) starts within "
+                "reach. The `mode` argument selects the standoff: 0.85m for "
+                "pick / floor_place, 0.65m for container_place, 0.45m for "
+                "surface_place (UR5 needs to be close for top-down release at "
+                "table height)."
             ),
             "parameters": {
                 "type": "object",
@@ -43,13 +47,33 @@ ORCHESTRATOR_TOOLS = [
                         "type": "string",
                         "description": (
                             "Optional. A visible landmark the navigator "
-                            "should stop close to (SAM3-verified + 1m standoff). "
+                            "should stop close to (SAM3-verified + standoff). "
                             "Before a floor pickup: pass the object itself "
                             "(e.g. 'red ball'). Before a place: pass the "
-                            "container name (e.g. 'trash bin'). Omit only "
-                            "when no specific landmark exists. (Surface "
-                            "pickups do NOT call navigate at all — the user "
-                            "pre-positions the robot next to the surface.)"
+                            "container or surface name (e.g. 'trash bin', "
+                            "'wooden coffee table'). Omit only when no specific "
+                            "landmark exists. (Surface pickups do NOT call "
+                            "navigate at all — the user pre-positions the robot "
+                            "next to the surface.)"
+                        ),
+                    },
+                    "mode": {
+                        "type": "string",
+                        "enum": [
+                            "pick",
+                            "surface_place",
+                            "container_place",
+                            "floor_place",
+                        ],
+                        "description": (
+                            "What the next agent will do after this navigate "
+                            "completes. Determines approach standoff: "
+                            "'pick' / 'floor_place' = 0.85m (default), "
+                            "'container_place' = 0.65m (drop-into bin), "
+                            "'surface_place' = 0.45m (UR5 needs close standoff "
+                            "for top-down release at table height — surface "
+                            "place fails reach if standoff > 0.55m). "
+                            "Default 'pick' if omitted."
                         ),
                     },
                 },
@@ -145,6 +169,7 @@ async def _handle_tool_call(
             mcp=mcp,
             destination=tool_input["destination"],
             target_object=tool_input.get("target_object"),
+            mode=tool_input.get("mode", "pick"),
             model=navigator_model,
         )
         return json.dumps(result)

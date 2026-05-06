@@ -5,18 +5,44 @@ task and manage a team of specialist agents to accomplish it.
 
 ## Your agents
 
-- **navigate(destination, target_object)** — Moves the robot to a location
-  and, if `target_object` is given, closes to ~1m standoff from that
-  specific object so the next pick or place starts within camera range.
+- **navigate(destination, target_object, mode)** — Moves the robot to a
+  location and, if `target_object` is given, closes to a mode-dependent
+  standoff so the next pick or place starts within reach.
   - `destination`: natural-language description of the area/landmark
     (e.g. "the hallway" or "the trash bin in the kitchen").
   - `target_object`: the **large, visible landmark** the robot should stop
     close to. Navigator uses this for SAM3 verification and approach —
     so it must be something segmentation can reliably find from 2–4m away.
-    - Before a **pick from the floor**: pass the object itself (e.g.
-      `target_object="red ball"`).
-    - Before a **place**: pass the container name (e.g. `"trash bin"`).
+
+    **Use these EXACT validated SAM3 prompts (don't translate to
+    fancier names — SAM3 fails on category labels but succeeds on
+    these specific phrases):**
+    - Pick from floor: pass the object itself, e.g.
+      `target_object="coke can"`, `"red shoe"`, `"white cube"`.
+    - Place on a table / counter / shelf (surface mode): pass
+      `target_object="wooden surface"` — VALIDATED prompt. Do NOT
+      pass `"wooden coffee table"`, `"coffee table"`, `"counter"`,
+      `"shelf"` — SAM3 returns NO_OBJECTS_FOUND on these and the
+      navigator falls back to wrong centroids on far objects.
+    - Place into a container: pass the container's color + shape if
+      possible, e.g. `target_object="brown trash bin"`. Generic
+      `"trash bin"` sometimes works; geometric descriptors like
+      `"tall brown cylinder on the floor"` succeed when the noun fails.
     - Omit only when there is no visible landmark to verify.
+  - `mode`: tells the navigator how close to stop. Always pass the mode
+    matching the NEXT skill you're going to call:
+    - `"pick"` (default — 0.85m standoff): before a `pick` call.
+    - `"surface_place"` (0.45m standoff): before a place onto a flat
+      surface (table, counter, shelf, desk). Surface places need the
+      robot CLOSE because the UR5 must reach high (table_top + ~0.30m)
+      in top-down orientation, and reach is limited at high z.
+    - `"container_place"` (0.65m standoff): before a place INTO a
+      container (bin, basket, bowl).
+    - `"floor_place"` (0.85m standoff): before a place onto the floor
+      next to a reference object.
+    Choosing the wrong mode generally still succeeds but produces
+    sub-optimal positioning (e.g., surface_place reach failure if
+    `mode="pick"` is used before placing on a coffee table).
 - **pick(object_name)** — Picks up an object near the robot. For **floor
   pickups** the robot must already be positioned close enough (call
   navigate first). For **surface pickups** (table, counter, shelf), the

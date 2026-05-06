@@ -32,51 +32,41 @@ There are THREE placement modes. Pick the right one based on the task.
   from the front cam, drop with `top_clearance_m=0.35` and
   `object_height_m=0` (default). Use the **Unified procedure** below.
 
-## Floor placement — fast path (soft placement, not drop)
+## Floor placement — DEFERRED
 
-The navigator already drove the robot to the drop spot. The held
-object is **gently set down** on the floor in front of the gripper
-(not dropped from height — the arm descends until the object's
-bottom touches the floor before release).
+**Floor placement is intentionally NOT supported in the current
+multi-agent demo.** Reasoning:
 
-1. **Pre-place pose** — `position=[0.55, 0.0, 0.20]` in
-   `base_footprint` (0.55m forward of robot, gripper 20cm above
-   floor — object bottom hovers ~6cm above floor).
-   `orientation=[1,0,0,0]` (top-down).
-2. **Move arm above drop spot** — `moveit__plan_and_execute` with
-   `group="arm"`, `target_type="pose"`,
-   `target={"position":[0.55, 0.0, 0.20], "orientation":[1,0,0,0], "frame_id":"base_footprint"}`.
-3. **Lower to floor (soft contact)** — `moveit__plan_and_execute` to
-   `[0.55, 0.0, descend_z]` in base_footprint. **descend_z must account
-   for the held object's height** so the object bottom rests on the
-   floor (not on the gripper):
-   - `descend_z = 0.14 + (object_height / 2)`
-   - The 0.14m is the Robotiq finger offset (wrist → fingertips). The
-     object is grasped centered between the fingers, so its CENTROID is
-     at fingertip height. Its BOTTOM is half its height below that.
-   - **Approximate object heights** (use these unless you know better):
-     * white cube (~5cm) → `descend_z = 0.165`
-     * coke can (~12cm) → `descend_z = 0.20`
-     * red shoe (~10cm) → `descend_z = 0.19`
-     * small ball (~6cm) → `descend_z = 0.17`
-     * unknown small object → `descend_z = 0.18` (safe default;
-       slightly above floor — at most ~3cm fall)
-   - DO NOT go below `descend_z = 0.14` (would push object into floor
-     and trigger collision_monitor / planning failure).
-4. **Open gripper** — `ros__send_action_goal` with
-   `action_name="/robotiq_gripper_controller/gripper_cmd"`,
-   `action_type="control_msgs/action/GripperCommand"`,
-   `goal={"command":{"position":0.0,"max_effort":50.0}}`.
-5. **Force-detach** (Gazebo physics) — `ros__publish_once` with
-   `topic="/gripper/force_detach_str"`,
-   `msg_type="std_msgs/msg/String"`, `msg={"data":"release"}`.
-6. **Lift clear** — `moveit__plan_and_execute` to
-   `[0.55, 0.0, 0.40]` (well above the placed object).
-7. **Return to look_forward** — `moveit__plan_and_execute` to
-   named_state `"look_forward"`.
-8. **Report SUCCESS** — verify is the orchestrator's job.
+- A correct soft set-down requires knowing the held object's height to
+  compute the right release wrist-z. Hardcoding object heights per
+  Gazebo model name (e.g., `Kitchen_Coke → 0.12m`) is a sim-only
+  cheat — it does not generalise to real-world deployment where the
+  agent has no a-priori model registry.
+- A single fixed safe-default (e.g., "always assume 12cm") works for
+  small canned-goods but bakes in another sim-specific assumption.
+- The proper architectural fix is **dynamic object-height measurement**
+  — `get_topdown_grasp_pose` returns the held object's bounding box
+  at pick time; that `bbox.size_z` should be passed through to place
+  (either via the orchestrator threading it to the place call, or via
+  place self-segmenting the held object on arm cam at look_forward).
 
-That's it for floor placement. Skip everything below this section.
+Until that measurement plumbing is wired up, **floor placement skill
+is intentionally absent** from this prompt. Tests with
+`target_container="floor"` should fall through to a clean FAILURE
+report rather than the agent improvising hardcoded numbers.
+
+For now, if the orchestrator requests "floor placement", the place
+agent should report:
+```
+FAILURE: floor placement not yet supported in this build — requires
+dynamic object-height measurement (pick.bbox.size_z → place input).
+Use surface placement (table/counter) or container placement (bin)
+instead.
+```
+
+Skip everything below this section if `target_container` is "floor"
+or implies floor placement. Otherwise continue to the Unified
+procedure for surface and container modes.
 
 ## Unified procedure (surface + container)
 
@@ -95,9 +85,15 @@ lower band. Both visible.
 
 1. **Move arm to standard `look_forward`** —
    `moveit__plan_and_execute` with `group="arm"`,
-   `target_type="named_state"`, `target={"state_name":"look_forward"}`.
-   If named state fails, use joint values: `target_type="joint_state"`,
+   `target_type="joint_state"`,
    `target={"joint_positions":[-0.0001, -0.2429, -2.8291, -0.7983, 1.5622, 0.0]}`.
+   If joint_state fails, fallback to `target_type="named_state"`,
+   `target={"state_name":"look_forward"}`.
+   (joint_state is PRIMARY: in Gazebo sim, named_state can report
+   success while the physical arm doesn't actually reach the target
+   pose due to gz_ros2_control / MoveIt state divergence — see
+   `feedback_moveit_state_divergence.md`. Explicit numeric joints
+   eliminate the silent-success failure mode.)
 
 2. **Clear octomap** — `ros__call_service` with
    `service_name="/clear_octomap"`, `service_type="std_srvs/srv/Empty"`,
@@ -128,17 +124,23 @@ lower band. Both visible.
       object_name = "<target surface>"
       top_clearance_m = 0.05      # air gap above surface at release
       object_height_m = <held object's height — see table below>
+      x_bias_m = 0.0              # no bias for now — bias pushes past UR5 reach for surface place
       pointcloud_topic = "/front/segmented_pointcloud"
       ```
       The tool computes `wrist_z = surface + 0.14 (finger) +
       object_height_m + 0.05`, so the released object lands ~5cm
-      above the surface and falls cleanly.
+      above the surface and falls cleanly. The `x_bias_m=0.15` adds
+      15cm forward to the centroid x AFTER the mean — without it,
+      SAM3's front-cam horizontal view biases the centroid toward
+      the visible near-edge of the table top, leading to placements
+      at the table's front edge.
 
       **Container mode** (bin/basket/bowl):
       ```
       object_name = "<target container>"
       top_clearance_m = 0.35      # wrist above container rim
       object_height_m = 0          # default — container drop ignores object dims
+      x_bias_m = 0.0              # default — bin rim from horizontal already roughly central
       pointcloud_topic = "/front/segmented_pointcloud"
       ```
       Wrist sits 35cm above container rim; object falls in.
@@ -153,61 +155,92 @@ lower band. Both visible.
       | unknown small object | 0.10 (safe default) |
 
       Take `coarse = (cx, cy, surface_height_m)` from the response.
-      Note: `cx, cy` may be biased toward the target's front face
-      (you're seeing it horizontally) — that's fine for now; stage 2
-      (arm-cam from above) refines for containers only.
+      For surface mode, `cx` already includes the +0.15m bias; pass
+      `place_pose` directly to MoveIt without further adjustment.
+      Stage 2 (arm-cam from above) refines for both modes; for
+      stage-2 SURFACE call set `x_bias_m=0.0` (arm-cam top-down view
+      doesn't have the horizontal-view bias).
 
 4. **Reach check on coarse xy.** `dist = sqrt(cx² + cy²)`.
-   - If `dist > 0.65m`: report FAILURE. Place does NOT drive the base
-     — that's the navigator's job. Navigator was supposed to deliver
-     the robot to ~0.85m standoff; if dist came back > 0.65m, either
-     the segmentation latched onto the wrong target or navigator's
-     approach failed. Orchestrator will re-call navigate.
-   - If `dist <= 0.65m`: proceed to step 5.
+   - If `dist > 0.70m`: report FAILURE. Place does NOT drive the base
+     — that's the navigator's job. The navigator (called with
+     mode='surface_place') was supposed to deliver the robot to ~0.45m
+     standoff. If `dist > 0.70m` came back, either the centroid is
+     biased very far from the actual target (rare), the segmentation
+     latched onto the wrong region, or navigator's approach failed.
+     Orchestrator will re-call navigate.
+   - If `dist <= 0.70m`: proceed to step 5. Note: dist between 0.60m
+     and 0.70m is borderline — UR5 top-down reach at high wrist-z
+     (e.g. 0.66m for can-on-coffee-table) caps near 0.60m. If the
+     pre-place plan in step 7 fails, that's the geometry confirming
+     the borderline case; clear_planning_scene + retry once, then
+     report FAILURE so orchestrator can re-navigate closer.
 
    The `place_pose` you carry forward to step 5 is the stage-1 result.
 
-5. **Branch on target type.**
+5. **Branch on target type.** Both modes go through stage 2 (refine
+   from above), but with different pose parameters in step 6.
 
-   **5-SURFACE (table, counter, shelf, desk): SKIP stage 2.**
-   The stage-1 `place_pose` from step 3b IS the final drop pose. Do
-   NOT move the arm to a look-down intermediate pose; do NOT
-   re-segment from above. SAM3 does not reliably segment a flat
-   wooden/laminate surface top-down (no object features to lock
-   onto), and the held object would intrude on the arm-cam FOV from
-   that pose. Stage 1 already gave you the surface top height
-   (`surface_height_m`) and the corrected wrist-z (via
-   `object_height_m`). Skip directly to step 7 (Execute drop).
+   **5-SURFACE (table, counter, shelf, desk):** stage-1 centroid from
+   the front camera is biased toward the near-edge of the visible
+   table top (camera viewing geometry). Without stage 2, the held
+   object lands at the front edge of the table — risk of rolling off.
+   Stage 2 from arm cam looking down at `surface_z + 0.40m` gives a
+   refined centroid that's closer to the actual table-top center.
 
    **5-CONTAINER (bin, basket, bowl, drainer, wagon, box):**
-   continue to step 6 — the rim center needs refinement because
-   stage 1's `(cx, cy)` is biased toward the bin's front face when
-   viewed horizontally.
+   stage-1 `(cx, cy)` is biased toward the bin's front face when
+   viewed horizontally. Stage 2 from above gets the rim center.
 
-6. **(CONTAINER ONLY) Stage 2 — Refine from above:**
+6. **Stage 2 — Refine from above (BOTH modes):**
 
-   a. **Position arm above the coarse target:**
+   a. **Position arm above the coarse target** —
       `moveit__plan_and_execute` with `group="arm"`,
       `target_type="pose"`,
       `target={"position":[cx, cy, surface_height_m + 0.40],
       "orientation":[1,0,0,0], "frame_id":"base_footprint"}`.
       The held object hangs below; the arm camera (offset on
-      `arm_wrist_3_link`) looks past it at the rim around it.
+      `arm_wrist_3_link`) looks past it at the surface / rim around it.
+      40cm overview height gives the arm cam enough FOV to see the
+      whole target (table top edges or container rim).
 
-   b. **Try SAM3 first:**
+   b. **Try SAM3 from arm cam:**
       `perception__segment_objects` with `prompt="<target>"`,
-      `camera="arm"`.
-      - On `SUCCESS`: call `perception__get_topdown_placing_pose` with
-        `object_name="<target>"`, `top_clearance_m=0.35` (default
-        cached cloud). This is your refined `place_pose`.
-      - On `NO_OBJECTS_FOUND`: proceed to 6c.
+      `camera="arm"`. If `<target>` is a generic surface descriptor
+      (e.g., "wooden coffee table"), use the **same fallback chain**
+      as step 3a (e.g., `"wooden surface"`).
+      - On `SUCCESS`: call `perception__get_topdown_placing_pose`
+        with these parameters (note: stage-2 uses `x_bias_m=0` because
+        arm-cam from above doesn't have the front-cam horizontal-view
+        bias that requires correction):
+        - **Surface:** `top_clearance_m=0.05`,
+          `object_height_m=<held object height>`,
+          `x_bias_m=0.0`,
+          `pointcloud_topic="/segmented_pointcloud"` (arm cam default).
+        - **Container:** `top_clearance_m=0.35`, `object_height_m=0`,
+          `pointcloud_topic="/segmented_pointcloud"`.
+
+        This is your **refined `place_pose`**. Use it for steps 7–8.
+      - On `NO_OBJECTS_FOUND`: proceed to 6c (fallback).
 
    c. **Fallback — use stage 1's pose:** if SAM3 cannot find the
-      container from above, accept the slight front-face bias and
-      use the stage-1 `place_pose` as the final
-      drop pose. Do NOT call `get_topdown_placing_pose` with
-      `use_cached=False` here — the raw-depth read from
-      `/arm_camera/points` can stall and is not currently reliable.
+      target from above (often happens for bare wooden surfaces with
+      no distinctive features at top-down view), use the stage-1
+      `place_pose` as the final drop pose. Do NOT call
+      `get_topdown_placing_pose` with `use_cached=False` here — the
+      raw-depth read from `/arm_camera/points` can stall and is not
+      currently reliable. Note: with stage-1 fallback for SURFACE, the
+      drop position may bias toward the table's front edge (visible-
+      portion centroid). Acceptable for a small object on a small
+      table; higher risk on long/deep surfaces.
+
+   d. **(SURFACE only) Sanity-check the refined `place_pose`:** if
+      the refined centroid jumped far from stage 1 (e.g.,
+      `|refined.xy - stage1.xy| > 0.20m`), the arm-cam segmentation
+      likely caught the held object or a nearby object instead of the
+      surface. Discard the refined centroid and use the stage-1 pose
+      with the warning logged. (For container mode, large refinement
+      is expected — bin rim vs front face — so no sanity check.)
 
 7. **Pre-place pose (above the drop spot — forces top-down approach):**
    `moveit__plan_and_execute` with `group="arm"`, `target_type="pose"`,
@@ -251,10 +284,11 @@ lower band. Both visible.
     just-released object on the way to look_forward.
 
 12. **Return to look_forward** — `moveit__plan_and_execute` with
-    `group="arm"`, `target_type="named_state"`,
-    `target={"state_name":"look_forward"}`. If named state fails, use
-    joint values: `target_type="joint_state"`,
+    `group="arm"`, `target_type="joint_state"`,
     `target={"joint_positions":[-0.0001, -0.2429, -2.8291, -0.7983, 1.5622, 0.0]}`.
+    If joint_state fails, fallback to `target_type="named_state"`,
+    `target={"state_name":"look_forward"}`.
+    (joint_state is PRIMARY — see step 1 rationale.)
 
 ## Critical rules
 
@@ -263,13 +297,17 @@ lower band. Both visible.
   extend above the arm-cam frame. Stage 2 (container refine) uses
   the ARM camera from above. The earlier "arm-cam only" rule was
   wrong and contradicted the procedure.
-- For SURFACES: stage 1 only — never move arm to a look-down pose,
-  never re-segment from above. SAM3 doesn't recognize bare surfaces
-  top-down, AND the held object intrudes on the arm-cam FOV from
-  that pose, polluting the mask.
-- For CONTAINERS: stage 1 + stage 2 (look-down + re-segment). Stage 2
-  corrects the front-face bias on cx,cy. If stage-2 SAM3 fails, fall
-  back to stage 1's pose rather than raw-depth.
+- **BOTH modes use stage 1 + stage 2** (look-down from above to refine
+  centroid). Stage-1 (front cam horizontal) gets surface_height_m and a
+  rough xy biased toward the near edge. Stage-2 (arm cam at
+  `surface_z + 0.40m`) refines the xy by viewing the target from above
+  with wider FOV. If stage-2 SAM3 fails (bare wooden surfaces sometimes
+  don't anchor top-down), fall back to stage-1's pose; do NOT use
+  raw-depth (`use_cached=False`) — it stalls.
+- **Stage-2 sanity check for SURFACE only**: discard the refined
+  centroid if it jumped >20cm from stage 1 (likely caught held object
+  or nearby object). Use stage-1 instead and warn. For CONTAINER, big
+  jumps are expected (rim vs front face) — no sanity check.
 - **`get_topdown_placing_pose` parameters by mode:**
   - Surface: `top_clearance_m=0.05` + `object_height_m=<held height>`.
     Tool computes `wrist_z = surface + 0.14 (finger) + object_height
