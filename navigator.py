@@ -75,21 +75,19 @@ async def _approach_target(
     """Drive to ~standoff_m from the segmented target.
 
     Reads the cached segmentation centroid (set by the prior
-    segment_objects call from _verify_target_visible), projects to map
-    frame, computes an approach pose, and dispatches nav2.
+    segment_objects call from ``_verify_target_visible``), then
+    delegates to the shared ``nav2__approach_target`` MCP primitive.
 
-    Replaces the per-pick / per-place creep that used to live in the
-    manipulation agents. Now navigator owns ALL positioning; pick/place
-    are pure manipulation primitives that assume the robot is in reach.
-
-    Standoff default 0.85m places the target at ~0.85m forward in
-    base_footprint, comfortably inside UR5's 1.10m practical reach.
+    All three architectures (LLM + tools, multi-agent, skill-based) call
+    the same primitive to ensure they implement approach identically.
+    The primitive owns geometry + motion (spin to face + drive_on_heading);
+    this wrapper only bridges perception (centroid lookup) to nav2.
 
     Returns: (success, info, tool_calls_used)
     """
     tool_calls = 0
 
-    # Read cached centroid from the most recent segmentation
+    # Read cached centroid from perception (TF snapshot taken at segment time)
     try:
         grasp_raw = await mcp.call_tool_prefixed(
             "perception__get_topdown_grasp_pose",
@@ -105,167 +103,37 @@ async def _approach_target(
     target_dist = math.hypot(target_x_base, target_y_base)
     logger.info(
         f"  [approach] target_base=({target_x_base:.2f},{target_y_base:.2f}) "
-        f"dist={target_dist:.2f}m standoff={standoff_m:.2f}m"
+        f"dist={target_dist:.2f}m standoff={standoff_m:.2f}m -> nav2__approach_target"
     )
 
-    # Already close enough? skip approach
-    if target_dist <= standoff_m + 0.10:
-        return (
-            True,
-            f"target already at {target_dist:.2f}m (≤ standoff {standoff_m:.2f}m + 0.10m); no approach needed",
-            tool_calls,
-        )
-
-    # Get robot pose in map frame. Try once; on failure, fall back to
-    # pure base-frame approach (no map projection needed for short-medium
-    # hops). This makes _approach_target resilient to nav2-mcp
-    # get_robot_pose timeouts (a recurring issue 2026-05-04).
-    rx = ry = ryaw = None
+    # Delegate to the shared MCP primitive
     try:
-        pose_raw = await mcp.call_tool_prefixed("nav2__get_robot_pose", {})
+        result_raw = await asyncio.wait_for(
+            mcp.call_tool_prefixed(
+                "nav2__approach_target",
+                {
+                    "target_x_base": target_x_base,
+                    "target_y_base": target_y_base,
+                    "standoff_m": standoff_m,
+                },
+            ),
+            timeout=60.0,
+        )
         tool_calls += 1
-        rx, ry, ryaw = _parse_robot_pose(pose_raw)
+    except asyncio.TimeoutError:
+        return False, "nav2__approach_target wall-timeout after 60s", tool_calls
     except Exception as e:
-        logger.warning(f"  [approach] get_robot_pose failed: {e}")
+        return False, f"nav2__approach_target error: {e}", tool_calls
 
-    if rx is None:
-        # FALLBACK: pure base-frame DriveOnHeading. We don't need map
-        # frame for the approach — just spin to face target then drive
-        # (target_dist - standoff). Lacks nav2's obstacle avoidance, so
-        # only use if the path is reasonably clear (fine for kids-room
-        # short approaches; risky on long hops with furniture).
-        logger.warning(
-            f"  [approach] FALLBACK — no map pose; using base-frame "
-            f"DriveOnHeading. target_dist={target_dist:.2f}m"
-        )
-        bearing = math.atan2(target_y_base, target_x_base)
-        drive_dist = max(target_dist - standoff_m, 0.20)
-        # Spin to face target if bearing is significant
-        if abs(bearing) > math.radians(8):
-            try:
-                await asyncio.wait_for(
-                    mcp.call_tool_prefixed(
-                        "nav2__spin_robot", {"angle": bearing}
-                    ),
-                    timeout=15.0,
-                )
-                tool_calls += 1
-                await asyncio.sleep(1.0)
-            except asyncio.TimeoutError:
-                logger.warning("  [approach] FALLBACK spin to face timed out")
-        # Drive forward
-        logger.info(
-            f"  [approach] FALLBACK DriveOnHeading {drive_dist:.2f}m "
-            f"(bearing was {math.degrees(bearing):.1f}°)"
-        )
-        try:
-            await asyncio.wait_for(
-                mcp.call_tool_prefixed(
-                    "nav2__drive_on_heading",
-                    {"distance": drive_dist, "speed": 0.3},
-                ),
-                timeout=35.0,
-            )
-            tool_calls += 1
-        except asyncio.TimeoutError:
-            return (
-                False,
-                f"FALLBACK DriveOnHeading timed out after 35s",
-                tool_calls,
-            )
-        await asyncio.sleep(1.5)
-        return (
-            True,
-            f"FALLBACK approached via base-frame DriveOnHeading "
-            f"({drive_dist:.2f}m forward, bearing {math.degrees(bearing):.1f}°)",
-            tool_calls,
-        )
-
-    # Project target from base_footprint to map frame
-    cos_y, sin_y = math.cos(ryaw), math.sin(ryaw)
-    target_map_x = rx + cos_y * target_x_base - sin_y * target_y_base
-    target_map_y = ry + sin_y * target_x_base + cos_y * target_y_base
-
-    # Approach pose: standoff_m back from target along robot→target vector
-    dx = target_map_x - rx
-    dy = target_map_y - ry
-    dist_to_target = math.hypot(dx, dy)
-    if dist_to_target < 0.01:
-        return True, "robot already on target xy", tool_calls
-    ux, uy = dx / dist_to_target, dy / dist_to_target
-    approach_x = target_map_x - standoff_m * ux
-    approach_y = target_map_y - standoff_m * uy
-    approach_yaw = math.atan2(dy, dx)
-    hop_dist = dist_to_target - standoff_m
-
-    logger.info(
-        f"  [approach] target_map=({target_map_x:.2f},{target_map_y:.2f}) "
-        f"approach=({approach_x:.2f},{approach_y:.2f},yaw={approach_yaw:.2f}) "
-        f"hop={hop_dist:.2f}m"
-    )
-
-    NAV_MIN_HOP_DIST = 0.40
-    NAV_WALL_TIMEOUT = 60.0
-
-    if hop_dist < NAV_MIN_HOP_DIST:
-        # Short hop: spin to face + DriveOnHeading (bypasses nav2 tolerance)
-        bearing = math.atan2(target_y_base, target_x_base)
-        if abs(bearing) > math.radians(8):
-            try:
-                await asyncio.wait_for(
-                    mcp.call_tool_prefixed(
-                        "nav2__spin_robot", {"angle": bearing}
-                    ),
-                    timeout=15.0,
-                )
-                tool_calls += 1
-                await asyncio.sleep(1.0)
-            except asyncio.TimeoutError:
-                logger.warning("  [approach] spin to face timed out")
-
-        drive_dist = max(hop_dist, 0.20)
-        logger.info(
-            f"  [approach] short-hop DriveOnHeading {drive_dist:.2f}m "
-            f"(bearing was {math.degrees(bearing):.1f}°)"
-        )
-        try:
-            await asyncio.wait_for(
-                mcp.call_tool_prefixed(
-                    "nav2__drive_on_heading",
-                    {"distance": drive_dist, "speed": 0.3},
-                ),
-                timeout=35.0,
-            )
-            tool_calls += 1
-        except asyncio.TimeoutError:
-            return False, "DriveOnHeading short-hop timed out", tool_calls
-    else:
-        # Long hop: navigate_to_pose handles spin + drive + obstacle avoidance
-        try:
-            await asyncio.wait_for(
-                mcp.call_tool_prefixed(
-                    "nav2__navigate_to_pose",
-                    {"x": approach_x, "y": approach_y, "yaw": approach_yaw},
-                ),
-                timeout=NAV_WALL_TIMEOUT,
-            )
-            tool_calls += 1
-        except asyncio.TimeoutError:
-            return (
-                False,
-                f"navigate_to_pose timed out after {NAV_WALL_TIMEOUT:.0f}s",
-                tool_calls,
-            )
+    text = result_raw if isinstance(result_raw, str) else str(result_raw)
+    if "error" in text.lower():
+        return False, text, tool_calls
 
     # Settle: nav2 reports complete before robot fully decelerates AND
     # before camera buffers flush from the new pose.
     await asyncio.sleep(1.5)
 
-    return (
-        True,
-        f"approached to ~{standoff_m:.2f}m standoff (hop was {hop_dist:.2f}m)",
-        tool_calls,
-    )
+    return True, text, tool_calls
 
 
 async def _wait_until_still(
