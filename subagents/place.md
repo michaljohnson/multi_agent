@@ -91,9 +91,8 @@ lower band. Both visible.
    `target={"state_name":"look_forward"}`.
    (joint_state is PRIMARY: in Gazebo sim, named_state can report
    success while the physical arm doesn't actually reach the target
-   pose due to gz_ros2_control / MoveIt state divergence — see
-   `feedback_moveit_state_divergence.md`. Explicit numeric joints
-   eliminate the silent-success failure mode.)
+   pose due to gz_ros2_control / MoveIt state divergence. Explicit
+   numeric joints eliminate the silent-success failure mode.)
 
 2. **Clear octomap** — `ros__call_service` with
    `service_name="/clear_octomap"`, `service_type="std_srvs/srv/Empty"`,

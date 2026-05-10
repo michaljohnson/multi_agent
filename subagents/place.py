@@ -2,16 +2,16 @@ import json
 import logging
 import re
 
-from multi_agent.llm_client import (
+from multi_agent.clients.llm import (
     call_llm, wants_tool_use, is_done, get_tool_calls,
     get_text_content, assistant_message, tool_result_message,
 )
-from multi_agent.mcp_client import MCPClient
+from multi_agent.clients.mcp import MCPClient
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-_SKILL_FILE = Path(__file__).parent / "skills" / "place.md"
+_SKILL_FILE = Path(__file__).parent / "place.md"
 
 PLACE_TOOLS = {
     "perception__segment_objects",

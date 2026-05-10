@@ -1,157 +1,100 @@
-# Multi-Agent Long-Horizon Manipulation
+# Multi-agent architecture
 
 A four-agent system for autonomous pick-and-place tasks on a Summit XL mobile manipulator (UR5 + Robotiq 2F-140) using ROS 2 Jazzy. Built with [LiteLLM](https://github.com/BerriAI/litellm) (provider-agnostic LLM client) and [MCP](https://modelcontextprotocol.io/) (Model Context Protocol) for robot control.
 
-**Bachelor thesis context:** comparison of three architectures (single-agent, multi-agent, deterministic skill-based) for long-horizon agentic manipulation. This module is the multi-agent track.
-
-## Architecture
+Originally built as one of three architectures compared in a BA thesis on "where the policy should live" in agentic robotics; released so others can reuse the pattern.
 
 ![Multi-agent architecture](docs/architecture.png)
 
-The system is a three-tier agentic stack:
+The system is a three-tier agentic stack: an orchestrator LLM decomposes a natural-language task into sub-agent calls; each sub-agent is a separate LLM with a narrow MCP tool set and its own system prompt; the MCP layer below talks to the robot.
 
-- **High level — Orchestrator (full autonomy).** Receives a natural-language task, decomposes it into `navigate(...)`, `pick(...)`, `place(...)` sub-agent calls, and uses `look()` for visual ground-truth checks between steps. Reasoning-only — never touches ROS directly.
-- **Middle level — Sub-agents.** Three LLM agents (Navigator, Pick, Place) each with a markdown skill prompt and a filtered MCP tool set. Navigator includes a deterministic spin-search helper; Pick and Place share a deterministic creeper helper.
-- **Low level — MCP client + 4 MCP servers.** All ROS interaction goes through MCP (`ros_mcp_server`, `moveit_mcp_server`, `nav2_mcp_server`, `perception_mcp_server`). No Python script touches ROS topics or actions directly.
+## Comparison-axis position (vs. siblings)
 
-LLM access goes through a single LiteLLM client → any provider (Anthropic, OpenAI, local Ollama, OpenAI-compatible endpoints).
+| Architecture | Where the policy lives | Planner LLM |
+|---|---|---|
+| Single-agent | LLM context, raw MCP tool surface | Frontier (e.g. Claude Opus) |
+| **Multi-agent** | **Orchestrator + 3 LLM sub-agents, narrow MCP subsets per agent** | **Frontier (e.g. Claude Opus)** |
+| Skill-based | Inside Python skills, hidden from the LLM | Small open-weights or frontier |
 
-Each agent is an LLM (default `claude-sonnet-4-20250514`) with a markdown **skill prompt** in `skills/` that defines its procedure, plus a filtered set of MCP tools.
+Multi-agent's design point: each LLM sees only the tools it needs (3-7 each), not the full ~60 across all four MCP servers. Decomposition narrows the per-call decision space at the cost of cross-agent coordination overhead.
 
-- **Orchestrator** (`orchestrator.py`, `skills/orchestrator.md`) — owns task decomposition. Calls navigate/pick/place sub-agents. Reasoning-only; does NOT touch ROS directly.
-- **Navigator** (`navigator.py`, `skills/navigator.md`) — drives to a known map area, verifies arrival via `look()` + LLM vision + SAM3 target check on either camera. Includes a deterministic spin-search fallback when the target is missing.
-- **Pick** (`pick.py`, `skills/pick.md`) — segment → grasp pose → reach check → optional `creep_closer` (drives base into reach via nav2) → pre-grasp → lower → close → verify via `/gripper/status`.
-- **Place** (`place.py`, `skills/place.md`) — three placement modes:
-  - **Floor** — fast path, no segmentation, soft contact (object-height-aware descent)
-  - **Surface** — segment-from-above (arm cam at `look_down_high`) for accurate top-z, then soft contact
-  - **Container** — full two-stage (front-cam coarse → arm-cam refine) with creep
+## Requirements
 
-## Scope (multi-agent track)
+- Python 3.10+
+- `litellm`, `python-dotenv`, an `mcp` Python client (any FastMCP-style streamable-http client works)
+- One or more MCP servers exposing the tool families this code expects:
+  - **nav2** — drive, navigate-to-pose, spin, lifecycle, `approach_target`
+  - **moveit** — plan/execute, IK, planning scene
+  - **perception** — segmentation, top-down grasp/place pose, look
+  - **ros** — generic topics, services, actions, parameters
+- An LLM provider (Anthropic API, OpenAI-compatible vLLM, OpenAI, Ollama — anything LiteLLM supports)
 
-**In scope:** floor pickup (cube, ball, shoe, can on floor) + low coffee table (~0.45m) pickup, floor placement, container placement (trash bin, drainer).
+The MCP servers are not part of this package; you bring your own. The architecture's contract with them is "any tool-calling LLM should be able to use them," which is exactly what an MCP server provides.
 
-**Out of scope:** higher surfaces (kitchen counter, dining table). These are explicitly left to the skill-based architecture for thesis comparison — multi-agent's lack of cross-step reasoning makes height-dependent standoff and complex recovery brittle.
-
-## Prerequisites
-
-- ROS 2 Jazzy + Summit XL simulation up (Gazebo, MoveIt, Nav2 stack, SAM3 segmentation nodes for arm + front cameras)
-- Rosbridge WebSocket server on port 9090
-- 4 MCP servers running and reachable (default ports below):
-  - `ros-mcp-server` on port 8888
-  - `moveit-mcp-server` on port 8001
-  - `nav2-mcp-server` on port 8002
-  - `perception-mcp-server` on port 8003
-
-Each MCP server is its own repository. Install + run them separately. Connection URLs are configured in your `.mcp.json`.
-
-## Setup
-
-1. Install dependencies:
-   ```bash
-   pip install litellm mcp --break-system-packages
-   ```
-
-2. Configure environment:
-   ```bash
-   cp .env.example .env
-   # Edit .env: set ANTHROPIC_API_KEY (or OPENAI_API_KEY, or any LiteLLM-supported provider)
-   ```
-
-3. Source env vars before running:
-   ```bash
-   set -a && source .env && set +a
-   ```
-
-## Usage
-
-### Full orchestrator (long-horizon task)
-
-```bash
-python3 -u -m multi_agent.main --task "Pick up the white cube in the kids room and drop it in the trash bin"
-```
-
-### Test individual agents (skip orchestrator)
-
-```bash
-# pick agent — assumes robot is already near the target
-python3 -m multi_agent.main --test-pick "white cube"
-
-# place agent — assumes robot is holding an object near the target
-python3 -m multi_agent.main --test-place "trash bin"
-python3 -m multi_agent.main --test-place "the floor in front of you"   # floor mode
-
-# navigator agent — drives to area + verifies arrival
-python3 -m multi_agent.main --test-navigator "kids room" --target-object "white cube"
-```
-
-### Verbose logging (debugging)
-
-```bash
-python3 -u -m multi_agent.main --task "..." --verbose
-```
-
-Default mode strips timestamps and framework noise — agent traces read like a narrative of decisions and tool calls. `--verbose` adds full timestamps + LiteLLM/MCP framework lines for debugging.
-
-## LLM provider
-
-Default is Anthropic Claude. To switch:
-
-```bash
-export LLM_MODEL=gpt-4o                                # OpenAI
-export LLM_MODEL=ollama/llama3                         # local Ollama
-export LLM_MODEL=anthropic/claude-sonnet-4-20250514    # Anthropic (default)
-```
-
-Or per-role:
-```bash
-export ORCHESTRATOR_MODEL=anthropic/claude-opus-4
-export EXECUTOR_MODEL=anthropic/claude-sonnet-4
-export NAVIGATOR_MODEL=anthropic/claude-sonnet-4
-```
-
-## Project structure
+## Repository layout
 
 ```
 multi_agent/
-├── main.py                # Entry point, CLI, logging config
-├── orchestrator.py        # Top-level planner — calls navigate/pick/place
-├── navigator.py           # Navigation agent + post-step (verify gate, spin-search)
-├── pick.py                # Pick agent + creep_closer helper
-├── place.py               # Place agent + creep_closer helper + verify_object_placed
-├── llm_client.py          # LiteLLM wrapper (provider-agnostic)
-├── mcp_client.py          # Async MCP server connection manager
-├── skills/
-│   ├── orchestrator.md
-│   ├── navigator.md       # Map / entry poses / pickable + placeable tables
-│   ├── pick.md
-│   └── place.md
-├── docs/                  # Architecture diagrams + thesis-related docs
-├── .env.example
-└── README.md
+  main.py                  CLI entry (--task / --test-{pick,place,navigator})
+  orchestrator.py          top-level brain — decomposes task into navigate/pick/place sub-agent calls
+  orchestrator.md          orchestrator system prompt (loaded by orchestrator.py)
+  subagents/               LLM-driven sub-agents, each with its own MCP tool subset and prompt
+    __init__.py
+    navigator.py / .md     drives base + verifies arrival via SAM3 + spin-search recovery
+    pick.py / .md          arm-cam segment → grasp pose → pre-grasp → descend → close → verify
+    place.py / .md         front-cam segment → drop pose → pre-place → descend → release → verify
+  clients/                 external system adapters
+    __init__.py
+    llm.py                 LiteLLM wrapper (provider-agnostic)
+    mcp.py                 MCP connection manager
+  docs/
+    architecture.png       3-level diagram (high/middle/low)
+  .env.example             environment-variable template
+  README.md                this file
 ```
 
-## Map / environment knowledge
+## Quick start
 
-The navigator's environment knowledge (room layout, entry poses, pickable objects, place targets) lives in `skills/navigator.md`. Update that file when:
-- Adding/moving objects in the world
-- Adjusting room layout or entry poses
-- Discovering better SAM3 prompts for an object class
+```bash
+cp multi_agent/.env.example multi_agent/.env
+# edit .env: pick a planner LLM (Anthropic, OpenAI-compatible local vLLM, OpenAI, ...)
 
-This is intentional: map knowledge is operational deployment configuration (any robot needs it). It is NOT hardcoded sim behavior — the same skills file works on a real Summit XL with the same map.
+# Single-skill smoke tests (assume robot is pre-positioned for pick/place):
+python3 -m multi_agent.main --test-pick "red coke can"
+python3 -m multi_agent.main --test-place "trash bin"
+python3 -m multi_agent.main --test-navigator "kitchen" --target-object "wooden coffee table"
 
-## Real-world deployability
+# Full orchestrator (long-horizon task):
+python3 -m multi_agent.main --task "pick up the red coke can in the kitchen and place it on the wooden coffee table in the living room"
+```
 
-Code in this module is designed to deploy to a real Summit XL after the thesis. No `gz model` calls or Gazebo plugin usage in production logic. Only validated, real-world-compatible primitives:
-- TF lookups via `nav2__get_robot_pose` (live `tf2_ros` listener with dedicated executor)
-- nav2 actions (`navigate_to_pose`, `DriveOnHeading`, `spin_robot`) for base motion
-- MoveIt actions (`plan_and_execute`) for arm motion
-- SAM3-based segmentation for perception
-- Standard `/gripper/status` for grasp verification
+`.env` is loaded automatically via `python-dotenv` from the package root. Run from the parent directory of `multi_agent/` so the package import resolves.
 
-Sim-only references (model names, world coordinates) are confined to the skill prompts (`skills/navigator.md`) — they are operational configuration, not application code.
+`--verbose` adds full timestamps + LiteLLM/MCP framework lines for debugging. Default mode strips timestamps and framework noise — agent traces read like a narrative of decisions and tool calls.
 
-## Known limitations
+## How a turn works
 
-- **nav2_mcp_server zombie goal** — when an MCP timeout fires, the server-side action goal stays active. Robot may execute the goal autonomously minutes later. Workaround: full sim restart on timeout.
-- **Gripper force-detach DDS race** — `/gripper/force_detach_str` publish occasionally fails silently. Workaround: verify via `/gripper/status` and retry.
-- **Verify-gate false positives on surface placement** — the front-cam check "object no longer visible" passes when an object falls behind / under furniture, looking identical to a real successful container drop. Reliable surface placement requires arm-cam-from-above verification.
+1. Orchestrator LLM receives the user task and three sub-agent tool schemas (`navigate`, `pick`, `place`) plus `look()` for visual ground-truth checks.
+2. Orchestrator emits a sub-agent call (e.g. `navigate(destination="kitchen", target_object="red coke can")`).
+3. The matching sub-agent in `subagents/` is invoked — it loads its own `.md` system prompt, sees its own narrow MCP tool subset (3-7 tools), and runs its own LLM loop.
+4. The sub-agent returns a structured result `{success: bool, reason: str, tool_calls_used: int, ...}` to the orchestrator.
+5. The orchestrator reads the result, optionally calls `look()` for visual confirmation, decides the next sub-agent or returns a final report.
+
+Each sub-agent has its own LLM context — the orchestrator does NOT see the sub-agents' internal MCP traces. This is the design point: each layer reasons over a narrower decision space than the layer above.
+
+## Adapting to your environment
+
+The skills assume specific MCP tool names (e.g. `perception__segment_objects`, `nav2__approach_target`, `moveit__plan_and_execute`). If your MCP servers expose different names, edit the `*_TOOLS` whitelist sets at the top of each `subagents/*.py` and the calls inside. The architectural pattern (orchestrator → sub-agent → MCP tool) is independent of the specific tool names.
+
+The hardcoded entry-pose table in `subagents/navigator.md` is keyed to a particular simulated home environment. Replace with your own room/area coordinates.
+
+## Design decisions
+
+- **Each sub-agent has its own LLM and prompt.** The narrow context per agent (one task, 3-7 tools, one system prompt) is the architecture's bet: smaller per-call decision space → better tool selection accuracy. The cost is composition fidelity — sub-agents can't share intermediate context with each other.
+- **Orchestrator is reasoning-only.** It never calls MCP tools directly. It only decides which sub-agent to call next, and verifies progress via `look()`. This separates task-decomposition reasoning from low-level robot control.
+- **Sub-agent verification is per-skill, not orchestrator-level.** Pick verifies via `/gripper/status`. Place verifies via post-release object visibility. The orchestrator trusts the structured success/failure result. This works for many cases but lets some false-success cases through — see code comments in `subagents/pick.py` and `subagents/place.py`.
+- **Failures bubble up; the orchestrator decides retry vs escalate.** Sub-agents do not loop indefinitely on tool errors. Each returns a structured failure that the orchestrator can act on.
+
+## Citing
+
+If you build on this work, please cite the BA thesis it originated from (forthcoming).

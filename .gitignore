@@ -1,6 +1,10 @@
 # Environment variables
 .env
 
+# Local MCP server config (URLs, ports, optional secrets) — keep .example committed
+.mcp.json
+!.mcp.json.example
+
 # Python
 __pycache__/
 *.py[cod]

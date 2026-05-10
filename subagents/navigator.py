@@ -5,16 +5,16 @@ import math
 import re
 import time
 
-from multi_agent.llm_client import (
+from multi_agent.clients.llm import (
     call_llm, wants_tool_use, is_done, get_tool_calls,
     get_text_content, assistant_message, tool_result_message,
 )
-from multi_agent.mcp_client import MCPClient
+from multi_agent.clients.mcp import MCPClient
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-_SKILL_FILE = Path(__file__).parent / "skills" / "navigator.md"
+_SKILL_FILE = Path(__file__).parent / "navigator.md"
 
 NAVIGATOR_TOOLS = {
     "moveit__plan_and_execute",
@@ -53,8 +53,7 @@ def _parse_robot_pose(raw) -> tuple[float | None, float | None, float | None]:
 #     distance leaves comfortable headroom for grasp pose math.
 #   - surface_place: wrist must be HIGH (surface_z + 0.31m for can on
 #     coffee table = 0.66m). UR5 top-down reach at z=0.66m caps at
-#     x≈0.55m, so navigator needs to deliver closer (~0.45m). See
-#     feedback_creeper_standoff_per_mode.md.
+#     x≈0.55m, so navigator needs to deliver closer (~0.45m).
 #   - container_place: drop INTO the bin from above; wrist sits 35cm
 #     above rim. Same UR5 high-z constraints apply but the rim is
 #     usually at moderate height, so 0.65m gives margin.
@@ -243,11 +242,11 @@ async def _verify_target_visible(
     camera (arm preferred, front acceptable) before navigator success is
     accepted.
 
-    Architectural contract (Giovanni-aligned, 2026-04-30): the navigator
-    only guarantees that the target is visible to the front camera at
-    handoff. The pick/place agent owns the fine-approach step (creep)
-    and re-segments on the arm camera once close. So a front-cam
-    SUCCESS is sufficient — the pick agent will drive in and resegment.
+    Architectural contract: the navigator only guarantees that the target
+    is visible to the front camera at handoff. The pick/place agent owns
+    the fine-approach step (creep) and re-segments on the arm camera once
+    close. So a front-cam SUCCESS is sufficient — the pick agent will
+    drive in and resegment.
 
     Arm-cam SUCCESS is treated as "even better" — it means the robot is
     already in pick range and the handoff is golden.
@@ -336,12 +335,11 @@ async def _try_spin_search(
 ) -> dict:
     """Post-process navigator result.
 
-    Architectural contract (Giovanni-aligned, 2026-04-30): the navigator
-    is responsible for landing the robot at a known map coordinate AND
-    ensuring the target is visible (front camera minimum, arm camera
-    ideal) at handoff. The drive-closer step is also owned by the
-    navigator (see ``_approach_target``); pick/place are pure
-    manipulation primitives once handoff completes.
+    Architectural contract: the navigator is responsible for landing the
+    robot at a known map coordinate AND ensuring the target is visible
+    (front camera minimum, arm camera ideal) at handoff. The drive-closer
+    step is also owned by the navigator (see ``_approach_target``);
+    pick/place are pure manipulation primitives once handoff completes.
 
     So the post-process is small:
       - LLM SUCCESS → straight to verify gate (no drive-closer here).

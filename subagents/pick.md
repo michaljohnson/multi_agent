@@ -43,14 +43,11 @@ close, lift, return). Higher surfaces are out of scope.
    **Why joint_state is PRIMARY (not the named_state):** in Gazebo sim,
    `plan_and_execute(named_state="look_forward")` can report success
    while the physical arm doesn't actually reach the target pose
-   (gz_ros2_control / MoveIt state divergence — see
-   `feedback_moveit_state_divergence.md`). Subsequent pose-target plans
-   then fail with "no valid path" because they plan from a divergent
-   internal model. Explicit numeric joint_positions force MoveIt to
-   plan/execute against exact targets, eliminating the silent-success
-   failure mode. Validated 2026-05-05 after 3 consecutive false-FAILURES
-   on a reachable pose were resolved by manual reset to these joint
-   values.
+   (gz_ros2_control / MoveIt state divergence). Subsequent pose-target
+   plans then fail with "no valid path" because they plan from a
+   divergent internal model. Explicit numeric joint_positions force
+   MoveIt to plan/execute against exact targets, eliminating the
+   silent-success failure mode.
 
    **Why this step is mandatory even though navigator hands off in
    look_forward**: on RETRY (orchestrator called pick again after a
@@ -107,8 +104,9 @@ close, lift, return). Higher surfaces are out of scope.
      Reporting FAILURE here is the correct, honest behavior.
 
    **If MoveIt's pre-grasp plan_and_execute fails on a reachable pose**
-   (x ≤ 1.10m): MoveIt's plan-pose path is known to be flaky (per
-   `feedback_plan_pose_unreliable.md`). Recovery:
+   (x ≤ 1.10m): MoveIt's pose-target planning is known to be flaky
+   (transient "no valid path" responses on reachable poses, especially
+   right after a controller state change). Recovery:
    - Retry the same pose ONCE after `moveit__clear_planning_scene`.
    - If still fails, re-segment (clear_octomap → segment_objects(arm) →
      get_topdown_grasp_pose) — the cache may have stale TF — then retry
@@ -166,7 +164,7 @@ close, lift, return). Higher surfaces are out of scope.
     If joint_state fails, fallback to `target_type="named_state"`,
     `target={"state_name":"look_forward"}`. (Same primary/fallback order
     as step 1 — joint_state avoids the gz_ros2_control state-divergence
-    failure documented in `feedback_moveit_state_divergence.md`.)
+    failure where named_state plans report success without moving the arm.)
     Note: this is the ORIGINAL `look_forward` (wrist_1=-0.7983) — the
     low-profile, navigator-friendly transit pose, NOT the tilted version
     used during pick. Returning to original look_forward avoids unnecessary

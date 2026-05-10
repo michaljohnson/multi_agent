@@ -2,8 +2,8 @@
 """Multi-agent room cleaning system.
 
 Usage:
-    python3 -m multi_agent.main --task "pick up the screwdriver from the coffee table and bring it to the kitchen table"
-    python3 -m multi_agent.main --test-pick "screwdriver"        
+    python3 -m multi_agent.main --task "pick up the white cube in the kids room and place it into the trash bin in the kids room"
+    python3 -m multi_agent.main --test-pick "white cube"        
     python3 -m multi_agent.main --test-navigator "kitchen" --target-object "red coke can"
     python3 -m multi_agent.main --test-place "trashbin"  
 """
@@ -13,10 +13,15 @@ import asyncio
 import json
 import logging
 import os
+from pathlib import Path
 
-from multi_agent.mcp_client import MCPClient
-from multi_agent.pick import execute_pick
-from multi_agent.place import execute_place
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).parent / ".env")
+
+from multi_agent.clients.mcp import MCPClient
+from multi_agent.subagents.pick import execute_pick
+from multi_agent.subagents.place import execute_place
 from multi_agent.orchestrator import run_orchestrator
 
 # === CONFIGURATION ===
@@ -76,7 +81,7 @@ async def test_navigator(
     target_object: str | None = None,
 ):
     """Test the navigator with a natural language destination (no orchestrator)."""
-    from multi_agent.navigator import execute_navigate
+    from multi_agent.subagents.navigator import execute_navigate
 
     print(f"\n=== Testing navigator: '{destination}' ===")
     if target_object:
@@ -170,11 +175,11 @@ def main():
         # Easy to follow what each agent is doing.
         class _AgentTagFormatter(logging.Formatter):
             _TAGS = {
-                "multi_agent.orchestrator": "[ORCHESTRATOR]",
-                "multi_agent.navigator":    "[NAVIGATOR]   ",
-                "multi_agent.pick":         "[PICK]        ",
-                "multi_agent.place":        "[PLACE]       ",
-                "multi_agent.mcp_client":   "[MCP]         ",
+                "multi_agent.orchestrator":         "[ORCHESTRATOR]",
+                "multi_agent.subagents.navigator": "[NAVIGATOR]   ",
+                "multi_agent.subagents.pick":      "[PICK]        ",
+                "multi_agent.subagents.place":     "[PLACE]       ",
+                "multi_agent.clients.mcp":         "[MCP]         ",
             }
 
             def format(self, record: logging.LogRecord) -> str:
@@ -196,7 +201,7 @@ def main():
     logging.getLogger("mcp").setLevel(framework_level)
     logging.getLogger("LiteLLM").setLevel(framework_level)
     logging.getLogger("litellm").setLevel(framework_level)
-    logging.getLogger("multi_agent.mcp_client").setLevel(framework_level)
+    logging.getLogger("multi_agent.clients.mcp").setLevel(framework_level)
 
     if args.test_pick:
         asyncio.run(test_pick(args.test_pick))

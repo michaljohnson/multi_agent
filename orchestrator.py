@@ -1,19 +1,19 @@
 import json
 import logging
 
-from multi_agent.llm_client import (
+from multi_agent.clients.llm import (
     call_llm, wants_tool_use, is_done, get_tool_calls,
     get_text_content, assistant_message, tool_result_message,
 )
-from multi_agent.mcp_client import MCPClient
-from multi_agent.pick import execute_pick
-from multi_agent.place import execute_place
-from multi_agent.navigator import execute_navigate
+from multi_agent.clients.mcp import MCPClient
+from multi_agent.subagents.pick import execute_pick
+from multi_agent.subagents.place import execute_place
+from multi_agent.subagents.navigator import execute_navigate
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-_SKILL_FILE = Path(__file__).parent / "skills" / "orchestrator.md"
+_SKILL_FILE = Path(__file__).parent / "orchestrator.md"
 
 
 # Custom tools the orchestrator can call (Python-implemented, not MCP)
