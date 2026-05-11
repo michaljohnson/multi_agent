@@ -75,7 +75,7 @@ python3 -m multi_agent.main --task "pick up the red coke can in the kitchen and 
 ## How a turn works
 
 1. Orchestrator LLM receives the user task and three sub-agent tool schemas (`navigate`, `pick`, `place`) plus `look()` for visual ground-truth checks.
-2. Orchestrator emits a sub-agent call (e.g. `navigate(destination="kitchen", target_object="red coke can")`).
+2. Orchestrator emits a sub-agent call (e.g. `navigate(target_area="kitchen", object_name="red coke can")`).
 3. The matching sub-agent in `subagents/` is invoked — it loads its own `.md` system prompt, sees its own narrow MCP tool subset (3-7 tools), and runs its own LLM loop.
 4. The sub-agent returns a structured result `{success: bool, reason: str, tool_calls_used: int, ...}` to the orchestrator.
 5. The orchestrator reads the result, optionally calls `look()` for visual confirmation, decides the next sub-agent or returns a final report.

@@ -26,7 +26,7 @@ ORCHESTRATOR_TOOLS = [
                 "Navigate the robot to a destination. Spawns a navigator agent "
                 "that uses its own environment knowledge to drive there, "
                 "verifies the area by camera, and closes to a mode-dependent "
-                "standoff from the target_object so the next step (pick or "
+                "standoff from the object_name so the next step (pick or "
                 "place) starts within reach. The `mode` argument selects the "
                 "standoff: 0.85m for pick / floor_place, 0.65m for "
                 "container_place, 0.45m for surface_place (UR5 needs to be "
@@ -35,14 +35,15 @@ ORCHESTRATOR_TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "destination": {
+                    "target_area": {
                         "type": "string",
                         "description": (
-                            "Natural language description of where to go "
-                            "(e.g. 'the wooden coffee table in the living room')."
+                            "Natural language description of the destination "
+                            "area (e.g. 'the kids room', 'the living room near "
+                            "the coffee table')."
                         ),
                     },
-                    "target_object": {
+                    "object_name": {
                         "type": "string",
                         "description": (
                             "Required. The visible landmark the navigator "
@@ -67,16 +68,17 @@ ORCHESTRATOR_TOOLS = [
                         "description": (
                             "What the next agent will do after this navigate "
                             "completes. Determines approach standoff: "
-                            "'pick' / 'floor_place' = 0.85m (default), "
+                            "'pick' / 'floor_place' = 0.85m, "
                             "'container_place' = 0.65m (drop-into bin), "
                             "'surface_place' = 0.45m (UR5 needs close standoff "
                             "for top-down release at table height — surface "
                             "place fails reach if standoff > 0.55m). "
-                            "Default 'pick' if omitted."
+                            "Required: pick the value matching the NEXT "
+                            "subagent call you intend to make."
                         ),
                     },
                 },
-                "required": ["destination", "target_object"],
+                "required": ["target_area", "object_name", "mode"],
             },
         },
     },
@@ -111,15 +113,14 @@ ORCHESTRATOR_TOOLS = [
                 "container or surface. The robot must already be near the "
                 "target (call navigate first). Spawns a place agent that "
                 "segments the target on the front camera, computes its "
-                "centroid, releases the object above it, and retracts. "
-                "If `object_name` is provided, a post-step verifies the "
-                "object is no longer visible on the front camera (i.e. "
-                "actually dropped in)."
+                "centroid, releases the object above it, retracts, and "
+                "verifies the drop via an arm-cam look-down vision check "
+                "(step 12 in place.md)."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "target_container": {
+                    "target_location": {
                         "type": "string",
                         "description": (
                             "Natural-language name of the drop target "
@@ -129,16 +130,15 @@ ORCHESTRATOR_TOOLS = [
                     "object_name": {
                         "type": "string",
                         "description": (
-                            "Optional. Name of the object currently held. "
-                            "When given, the place agent runs a ground-truth "
-                            "visibility check after release: if the object "
-                            "is still segmentable on the front camera, the "
-                            "place is treated as FAILED (the object did not "
-                            "land inside the container)."
+                            "Name of the held object. Used by step 12 "
+                            "(visual look-down verify) as the label when "
+                            "deciding whether the released object landed "
+                            "in/on the target. Always pass the same name "
+                            "the prior pick() call used."
                         ),
                     },
                 },
-                "required": ["target_container"],
+                "required": ["target_location", "object_name"],
             },
         },
     },
@@ -166,9 +166,9 @@ async def _handle_tool_call(
     if tool_name == "navigate":
         result = await execute_navigate(
             mcp=mcp,
-            destination=tool_input["destination"],
-            target_object=tool_input["target_object"],
-            mode=tool_input.get("mode", "pick"),
+            target_area=tool_input["target_area"],
+            object_name=tool_input["object_name"],
+            mode=tool_input["mode"],
             model=navigator_model,
         )
         return json.dumps(result)
@@ -184,8 +184,8 @@ async def _handle_tool_call(
     elif tool_name == "place":
         result = await execute_place(
             mcp=mcp,
-            target_container=tool_input["target_container"],
-            object_name=tool_input.get("object_name"),
+            target_location=tool_input["target_location"],
+            object_name=tool_input["object_name"],
             model=executor_model,
         )
         return json.dumps(result)

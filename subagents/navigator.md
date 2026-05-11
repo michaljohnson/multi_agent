@@ -138,7 +138,7 @@ matches the task.
 | Location | Position | Entry pose | Notes |
 |---|---|---|---|
 | Wooden coffee table | `(1.50, 2.04, 0.33)` — living room | Living room (couch view) | Surface drop. ~0.45m high. |
-| Floor next to matching shoe | `(4.06, -3.61)` — living room east side, near shoe rack | Living room (TV view) | Floor drop. **Navigation landmark: `"shoe rack"`** (large, easy to segment) — the matching `LivingRoom_Shoe` is too small to use as the navigator's target_object from across the room. |
+| Floor next to matching shoe | `(4.06, -3.61)` — living room east side, near shoe rack | Living room (TV view) | Floor drop. **Navigation landmark: `"shoe rack"`** (large, easy to segment) — the matching `LivingRoom_Shoe` is too small to use as the navigator's object_name from across the room. |
 | Brown trash bin (kids room) | `(-4.19, -1.56)` — kids room, mid-east | Kids room | Drop INTO container. Renamed from LivingRoom_Trash → `KidsRoom_Trash` 2026-05-02. |
 
 ### People in the scene (do NOT try to pick or interact)
@@ -195,7 +195,7 @@ the small target — that's what the segmentation pipeline is for.
    - **Check 1 — Area**: Does this match the destination's landmarks?
      (couch + coffee table for living room; fridge + range hood for
      kitchen; bunk bed + LEGO shelves for kids room; etc.)
-   - **Check 2 — Target**: Is the `target_object` visible in the
+   - **Check 2 — Target**: Is the `object_name` visible in the
      image right now?
 
    Then pick exactly one of three outcomes:
@@ -315,9 +315,9 @@ When done, **call `report_navigation_result(success=..., error_code=..., reason=
 
 `success` is `true` only when:
 - Check 1 (area) PASS — the front-camera scene matches the destination's landmarks, AND
-- Check 2 (target) PASS — `target_object` is visible.
+- Check 2 (target) PASS — `object_name` is visible.
 
-A `target_object` is always supplied; navigation's job is to put it in view for the next manipulation step.
+A `object_name` is always supplied; navigation's job is to put it in view for the next manipulation step.
 
 Otherwise `success` is `false` with the most specific `error_code`:
 - `NAV_AREA_WRONG` — Check 1 FAIL (wrong room / never reached destination).

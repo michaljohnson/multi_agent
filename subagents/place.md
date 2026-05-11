@@ -52,7 +52,7 @@ multi-agent demo.** Reasoning:
 
 Until that measurement plumbing is wired up, **floor placement skill
 is intentionally absent** from this prompt. Tests with
-`target_container="floor"` should fall through to a clean FAILURE
+`target_location="floor"` should fall through to a clean FAILURE
 report rather than the agent improvising hardcoded numbers.
 
 For now, if the orchestrator requests "floor placement", the place
@@ -64,7 +64,7 @@ Use surface placement (table/counter) or container placement (bin)
 instead.
 ```
 
-Skip everything below this section if `target_container` is "floor"
+Skip everything below this section if `target_location` is "floor"
 or implies floor placement. Otherwise continue to the Unified
 procedure for surface and container modes.
 
@@ -285,7 +285,7 @@ lower band. Both visible.
     vantage for the verification step below.
 
 12. **Verify drop landed in/on the target — visual look-down inspection.**
-    Skip this step in surface mode if `target_container == "floor"`
+    Skip this step in surface mode if `target_location == "floor"`
     (out of scope). Otherwise run this for both container and surface
     modes; it is the gate on success.
 
@@ -295,7 +295,7 @@ lower band. Both visible.
 
     b. Visually decide: is the `<object_name>` you were holding now
        inside (container mode) / on (surface mode) the
-       `<target_container>`?
+       `<target_location>`?
        - Look for the object's shape and color (e.g., a white cube) at
          the location where you released it.
        - For containers (bin/basket): the object should be visible
@@ -398,7 +398,7 @@ Args:
 - `success` (bool): `true` only if the held object was released at the intended drop pose and the arm retracted to look_forward. A ground-truth post-step verifier (front-camera SAM3 for the held object) may still override this to `false` if the object is still visible after release.
 - `error_code` (enum):
   - `NONE` — use on success.
-  - `PLACE_OUT_OF_SCOPE` — target_container is unsupported (e.g. "floor" before dynamic object-height plumbing is added).
+  - `PLACE_OUT_OF_SCOPE` — target_location is unsupported (e.g. "floor" before dynamic object-height plumbing is added).
   - `PLACE_SEG_MISSED` — SAM3 could not find the target container on the front camera after the prompt + fallback chain. Navigator did not deliver the robot to a viable standoff.
   - `PLACE_REACH_EXCEEDED` — computed drop pose `dist > 0.70m` from base, past UR5 place envelope. Navigator must redeliver.
   - `PLACE_PLAN_FAILED` — MoveIt plan failed at pre-place / descent / release / retract even after `clear_planning_scene` recovery.

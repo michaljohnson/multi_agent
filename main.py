@@ -4,7 +4,7 @@
 Usage:
     python3 -m multi_agent.main --task "pick up the white cube in the kids room and place it into the trash bin in the kids room"
     python3 -m multi_agent.main --test-pick "white cube"        
-    python3 -m multi_agent.main --test-navigator "kitchen" --target-object "red coke can"
+    python3 -m multi_agent.main --test-navigator "kitchen" --object-name "red coke can"
     python3 -m multi_agent.main --test-place "trashbin"  
 """
 
@@ -58,22 +58,21 @@ async def test_pick(object_name: str):
         print(json.dumps(result, indent=2))
 
 
-async def test_place(target_container: str, target_object: str | None = None):
+async def test_place(target_location: str, object_name: str):
     """Test place executor on a single target (no orchestrator/navigator).
 
     Assumes the robot is already holding an object and positioned near
     the drop target.
     """
-    print(f"\n=== Testing place executor: target='{target_container}' ===")
-    if target_object:
-        print(f"    Held object: '{target_object}'")
+    print(f"\n=== Testing place executor: target='{target_location}' ===")
+    print(f"    Held object: '{object_name}'")
     print()
 
     async with MCPClient() as mcp:
         result = await execute_place(
             mcp=mcp,
-            target_container=target_container,
-            object_name=target_object,
+            target_location=target_location,
+            object_name=object_name,
             model=EXECUTOR_MODEL,
         )
         print(f"\n=== Place Result ===")
@@ -81,21 +80,24 @@ async def test_place(target_container: str, target_object: str | None = None):
 
 
 async def test_navigator(
-    destination: str,
-    target_object: str,
+    target_area: str,
+    object_name: str,
+    mode: str,
 ):
-    """Test the navigator with a natural language destination (no orchestrator)."""
+    """Test the navigator with a natural language target area (no orchestrator)."""
     from multi_agent.subagents.navigator import execute_navigate
 
-    print(f"\n=== Testing navigator: '{destination}' ===")
-    print(f"    Target object: '{target_object}'")
+    print(f"\n=== Testing navigator: '{target_area}' ===")
+    print(f"    Target object: '{object_name}'")
+    print(f"    Mode: '{mode}'")
     print()
 
     async with MCPClient() as mcp:
         result = await execute_navigate(
             mcp=mcp,
-            destination=destination,
-            target_object=target_object,
+            target_area=target_area,
+            object_name=object_name,
+            mode=mode,
             model=NAVIGATOR_MODEL,
         )
         print(f"\n=== Result ===")
@@ -150,13 +152,25 @@ def main():
         nargs="+",
         metavar="DEST",
         default=None,
-        help="Test navigation to DEST, optionally with --target-object (e.g. --test-navigator the kitchen area)",
+        help="Test navigation to DEST, optionally with --object-name (e.g. --test-navigator the kitchen area)",
     )
     parser.add_argument(
-        "--target-object",
+        "--object-name",
         type=str,
         default=None,
         help="Target object context for navigator (e.g. 'red coke can on the floor')",
+    )
+    parser.add_argument(
+        "--mode",
+        type=str,
+        choices=["pick", "surface_place", "container_place", "floor_place"],
+        default=None,
+        help=(
+            "Required for --test-navigator. What the next subagent call "
+            "will be — determines the approach standoff. 'pick' / "
+            "'floor_place' = 0.85m, 'container_place' = 0.65m, "
+            "'surface_place' = 0.45m."
+        ),
     )
     parser.add_argument(
         "--verbose", "-v",
@@ -209,16 +223,30 @@ def main():
     if args.test_pick:
         asyncio.run(test_pick(args.test_pick))
     elif args.test_place:
-        asyncio.run(test_place(args.test_place, args.target_object))
-    elif args.test_navigator:
-        dest = " ".join(args.test_navigator)
-        if not args.target_object:
+        if not args.object_name:
             parser.error(
-                "--test-navigator requires --target-object (the navigator's "
+                "--test-place requires --object-name (step 12's look-down "
+                "vision verify needs a label to decide whether the released "
+                "object landed in/on the target)"
+            )
+        asyncio.run(test_place(args.test_place, args.object_name))
+    elif args.test_navigator:
+        area = " ".join(args.test_navigator)
+        if not args.object_name:
+            parser.error(
+                "--test-navigator requires --object-name (the navigator's "
                 "job is to put the target in view; without one it has nothing "
                 "to verify)"
             )
-        asyncio.run(test_navigator(dest, args.target_object))
+        if not args.mode:
+            parser.error(
+                "--test-navigator requires --mode (picks the approach "
+                "standoff: 'pick' / 'floor_place' = 0.85m, "
+                "'container_place' = 0.65m, 'surface_place' = 0.45m). "
+                "The silent default to 'pick' previously broke downstream "
+                "places that needed a closer standoff."
+            )
+        asyncio.run(test_navigator(area, args.object_name, args.mode))
     elif args.task:
         asyncio.run(run_full(args.task))
     else:

@@ -5,12 +5,12 @@ task and manage a team of specialist agents to accomplish it.
 
 ## Your agents
 
-- **navigate(destination, target_object, mode)** — Moves the robot to a
-  location and, if `target_object` is given, closes to a mode-dependent
+- **navigate(target_area, object_name, mode)** — Moves the robot to a
+  location and and object closes to a mode-dependent
   standoff so the next pick or place starts within reach.
-  - `destination`: natural-language description of the area/landmark
+  - `target_area`: natural-language description of the area/landmark
     (e.g. "the hallway" or "the trash bin in the kitchen").
-  - `target_object`: the **large, visible landmark** the robot should stop
+  - `object_name`: the **large, visible landmark** the robot should stop
     close to. Navigator uses this for SAM3 verification and approach —
     so it must be something segmentation can reliably find from 2–4m away.
 
@@ -18,14 +18,14 @@ task and manage a team of specialist agents to accomplish it.
     fancier names — SAM3 fails on category labels but succeeds on
     these specific phrases):**
     - Pick from floor: pass the object itself, e.g.
-      `target_object="coke can"`, `"red shoe"`, `"white cube"`.
+      `object_name="coke can"`, `"red shoe"`, `"white cube"`.
     - Place on a table / counter / shelf (surface mode): pass
-      `target_object="wooden surface"` — VALIDATED prompt. Do NOT
+      `object_name="wooden surface"` — VALIDATED prompt. Do NOT
       pass `"wooden coffee table"`, `"coffee table"`, `"counter"`,
       `"shelf"` — SAM3 returns NO_OBJECTS_FOUND on these and the
       navigator falls back to wrong centroids on far objects.
     - Place into a container: pass the container's color + shape if
-      possible, e.g. `target_object="brown trash bin"`. Generic
+      possible, e.g. `object_name="brown trash bin"`. Generic
       `"trash bin"` sometimes works; geometric descriptors like
       `"tall brown cylinder on the floor"` succeed when the noun fails.
     - Omit only when there is no visible landmark to verify.
@@ -48,7 +48,7 @@ task and manage a team of specialist agents to accomplish it.
   navigate first). For **surface pickups** (table, counter, shelf), the
   user pre-positions the robot next to the surface, so call `pick`
   immediately without a preceding navigate — see strategy below.
-- **place(target_container)** — Places the held object on/into a target
+- **place(target_location)** — Places the held object on/into a target
   container or surface. The place agent perceives the target on its
   front camera, computes the drop pose, and releases the object. The
   robot must already be near the target (call navigate first).
@@ -165,23 +165,23 @@ what a sub-agent just claimed).
 
 3. For each row in the table, in order:
    - **Floor pickup** steps:
-     a. Navigate to the pickup location. Pass `target_object` = the
-        object itself (e.g. `navigate(destination="the bedroom floor",
-        target_object="red ball")`).
+     a. Navigate to the pickup location. Pass `object_name` = the
+        object itself (e.g. `navigate(target_area="the bedroom floor",
+        object_name="red ball")`).
      b. Pick the object.
-     c. Navigate to the place location. Pass `target_object` = the
-        container name (e.g. `navigate(destination="trash bin in the
-        kitchen", target_object="trash bin")`).
+     c. Navigate to the place location. Pass `object_name` = the
+        container name (e.g. `navigate(target_area="trash bin in the
+        kitchen", object_name="trash bin")`).
      d. Place the object — pass BOTH the container/surface name AND
-        the object name (e.g. `place(target_container="trash bin",
+        the object name (e.g. `place(target_location="trash bin",
         object_name="screwdriver")`). The place agent uses `object_name`
         for a post-release visibility check that catches the case where
         the object was released outside the container.
    - **Surface pickup** steps:
      a. Pick the object IMMEDIATELY (the user has pre-positioned the
         robot). No pre-pick navigate.
-     b. Navigate to the place location with `target_object` = container.
-     c. Place the object — pass BOTH `target_container` and `object_name`
+     b. Navigate to the place location with `object_name` = container.
+     c. Place the object — pass BOTH `target_location` and `object_name`
         so the post-release visibility check can verify the drop.
 4. Process rows in table order. If an agent fails, note the reason and
    continue to the next row.
@@ -228,7 +228,7 @@ what a sub-agent just claimed).
   MoveIt's attach state; this is your independent second signal from
   a different backend (pixels, not world state) AND the only check
   that catches "attached the wrong object".
-- **After navigate(destination, target_object) returns success, verify
+- **After navigate(target_area, object_name) returns success, verify
   visually**: call `look(camera="front")` and check that the target
   area / landmark is visible ahead. Front is the only sensible camera
   here — the arm camera points wherever the arm happens to be, not at

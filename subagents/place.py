@@ -90,8 +90,8 @@ def _parse_seg_status(seg_raw) -> str:
 
 async def execute_place(
     mcp: MCPClient,
-    target_container: str,
-    object_name: str = None,
+    target_location: str,
+    object_name: str,
     model: str = None,
     max_tool_calls: int = 25,
 ) -> dict:
@@ -100,45 +100,43 @@ async def execute_place(
     The robot must already be positioned within UR5 reach of the target
     container/surface. Navigator owns ALL positioning (including the
     fine-approach to ~0.85m standoff). Place is a pure manipulation
-    primitive: segment, compute drop pose, lower, release, retract.
-    If the segmented drop pose is out of reach, place reports FAILURE
-    — it does not drive the base.
+    primitive: segment, compute drop pose, lower, release, retract,
+    visually verify the drop via arm-cam look-down (step 12). If the
+    segmented drop pose is out of reach, place reports FAILURE — it
+    does not drive the base.
 
     Args:
         mcp: Connected MCPClient instance.
-        target_container: Natural-language name of the drop target
+        target_location: Natural-language name of the drop target
             (e.g. "basket", "box", "kitchen table").
-        object_name: Optional name of the held object. When provided it
-            is included in the agent's user_message so step 12 (the
-            agent-side look-down vision verify gate) knows what to look
-            for in the arm camera image. When omitted, the agent has no
-            label for step 12 and should report success=false with
-            error_code=PLACE_DROP_VERIFY_FAILED unless it can otherwise
-            confirm the drop landed in the target.
+        object_name: Name of the held object. Required — step 12's
+            visual look-down verify gate uses this as the label when
+            deciding whether the released object landed in/on the
+            target. The orchestrator should pass the same name the
+            prior pick() call used.
         model: LiteLLM model string. Defaults to LLM_MODEL env var.
         max_tool_calls: Safety cap on tool calls to prevent runaway.
 
     Returns:
         {"success": bool, "error_code": str, "reason": str, "tool_calls_used": int}
     """
+    if not object_name:
+        raise ValueError(
+            "execute_place requires a non-empty object_name. Step 12 "
+            "(look-down vision verify) needs a label to decide whether "
+            "the released object landed in/on the target."
+        )
+
     all_tools = mcp.get_tools()
     tools = _filter_tools(all_tools) + [REPORT_PLACE_RESULT_TOOL]
 
     system_prompt = _SKILL_FILE.read_text()
-    if object_name:
-        user_message = (
-            f"Place the currently held '{object_name}' on/into the "
-            f"'{target_container}' in front of you. Use '{object_name}' as "
-            f"the SAM3 prompt for the step 12 look-down verification."
-        )
-    else:
-        user_message = (
-            f"Place the currently held object on/into the '{target_container}' "
-            f"in front of you. NOTE: no object_name was supplied, so the "
-            f"step 12 look-down verification gate cannot run — report "
-            f"success=false, error_code=PLACE_DROP_VERIFY_FAILED if you "
-            f"cannot otherwise confirm the drop landed in the target."
-        )
+    user_message = (
+        f"Place the currently held '{object_name}' on/into the "
+        f"'{target_location}' in front of you. Use '{object_name}' as "
+        f"the label when visually verifying the drop in step 12 (look-down "
+        f"vision check from the lift-clear pose)."
+    )
 
     messages = [
         {"role": "system", "content": system_prompt},
@@ -146,7 +144,7 @@ async def execute_place(
     ]
     tool_call_count = 0
 
-    logger.info(f"Place started: target='{target_container}' object='{object_name}'")
+    logger.info(f"Place started: target='{target_location}' object='{object_name}'")
 
     while tool_call_count < max_tool_calls:
         response = call_llm(messages=messages, tools=tools, model=model)

@@ -71,7 +71,7 @@ REPORT_NAVIGATION_RESULT_TOOL = {
                     "description": (
                         "Per-check breakdown. Always include both entries "
                         "(name='area' and name='target') with result in "
-                        "{PASS, FAIL}. A target_object is always supplied."
+                        "{PASS, FAIL}. An object_name is always supplied."
                     ),
                     "items": {
                         "type": "object",
@@ -142,7 +142,7 @@ _STANDOFF_BY_MODE = {
 
 async def _approach_target(
     mcp: MCPClient,
-    target_object: str,
+    object_name: str,
     standoff_m: float = 0.85,
 ) -> tuple[bool, str, int]:
     """Drive to ~standoff_m from the segmented target.
@@ -164,7 +164,7 @@ async def _approach_target(
     try:
         grasp_raw = await mcp.call_tool_prefixed(
             "perception__get_topdown_grasp_pose",
-            {"object_name": target_object},
+            {"object_name": object_name},
         )
         tool_calls += 1
         grasp = json.loads(grasp_raw) if isinstance(grasp_raw, str) else grasp_raw
@@ -254,7 +254,7 @@ async def _wait_until_still(
 
 async def _spin_search(
     mcp: MCPClient,
-    target_object: str,
+    object_name: str,
     max_spins: int = 8,
     spin_angle: float = 1.047,
 ) -> tuple[bool, str | None, int]:
@@ -288,7 +288,7 @@ async def _spin_search(
         try:
             seg_raw = await mcp.call_tool_prefixed(
                 "perception__segment_objects",
-                {"prompt": target_object, "camera": "front", "timeout": 20},
+                {"prompt": object_name, "camera": "front", "timeout": 20},
             )
             tool_calls += 1
             seg = json.loads(seg_raw) if isinstance(seg_raw, str) else seg_raw
@@ -302,7 +302,7 @@ async def _spin_search(
             continue
 
         if status == "SUCCESS":
-            logger.info(f"  [spin-search] FOUND '{target_object}' after {i+1} spins")
+            logger.info(f"  [spin-search] FOUND '{object_name}' after {i+1} spins")
             return True, seg.get("description", ""), tool_calls
 
     logger.info(f"  [spin-search] NOT FOUND after {max_spins} spins")
@@ -310,9 +310,9 @@ async def _spin_search(
 
 
 async def _verify_target_visible(
-    mcp: MCPClient, target_object: str
+    mcp: MCPClient, object_name: str
 ) -> tuple[bool, str, int]:
-    """Segmentation gate: target_object MUST be segmented on at least one
+    """Segmentation gate: object_name MUST be segmented on at least one
     camera (arm preferred, front acceptable) before navigator success is
     accepted.
 
@@ -343,13 +343,13 @@ async def _verify_target_visible(
         try:
             seg_raw = await mcp.call_tool_prefixed(
                 "perception__segment_objects",
-                {"prompt": target_object, "camera": camera, "timeout": 20},
+                {"prompt": object_name, "camera": camera, "timeout": 20},
             )
             tool_calls += 1
             seg = json.loads(seg_raw) if isinstance(seg_raw, str) else seg_raw
             status = seg.get("status", "UNKNOWN")
             logger.info(
-                f"  [verify] SAM3 {camera} -> {status} for '{target_object}'"
+                f"  [verify] SAM3 {camera} -> {status} for '{object_name}'"
             )
             return status
         except Exception as e:
@@ -371,7 +371,7 @@ async def _verify_target_visible(
     logger.info(
         f"  [verify] both cameras missed; spin-searching up to "
         f"{_VERIFY_SPIN_STEPS} × {_VERIFY_SPIN_ANGLE:.2f}rad for "
-        f"'{target_object}' (arm + front check each spin)"
+        f"'{object_name}' (arm + front check each spin)"
     )
     for i in range(_VERIFY_SPIN_STEPS):
         try:
@@ -403,7 +403,7 @@ async def _verify_target_visible(
 
 async def _try_spin_search(
     mcp: MCPClient,
-    target_object: str | None,
+    object_name: str,
     result: dict,
     standoff_m: float = 0.85,
 ) -> dict:
@@ -428,9 +428,9 @@ async def _try_spin_search(
     """
     if result["success"]:
         logger.info(
-            f"  LLM saw '{target_object}' via look() — going to verify gate"
+            f"  LLM saw '{object_name}' via look() — going to verify gate"
         )
-        return await _final_verify_gate(mcp, target_object, result, standoff_m=standoff_m)
+        return await _final_verify_gate(mcp, object_name, result, standoff_m=standoff_m)
 
     # LLM did not see the target. Three failure modes:
     #   - Check 1 explicitly FAIL: wrong area / never reached destination.
@@ -458,30 +458,40 @@ async def _try_spin_search(
         return result
 
     logger.info(
-        f"  LLM didn't find '{target_object}' — starting deterministic spin-search"
+        f"  LLM didn't find '{object_name}' — starting deterministic spin-search"
     )
-    found, scene_text, spin_calls = await _spin_search(mcp, target_object)
+    found, scene_text, spin_calls = await _spin_search(mcp, object_name)
     result["tool_calls_used"] += spin_calls
 
     if found:
         logger.info(
-            f"  Found '{target_object}' via spin — handing off to verify gate"
+            f"  Found '{object_name}' via spin — handing off to verify gate"
         )
         result["success"] = True
-        # Recovery clears the agent's failure error code; reason text below
-        # records that the runtime recovered, the original checks[] stay as
-        # the agent's honest observation at termination time.
         result["error_code"] = "NONE"
         result["reason"] = (
-            f"Found '{target_object}' after spin-search. "
+            f"Found '{object_name}' after spin-search. "
             f"Scene: {scene_text[:400] if scene_text else 'N/A'}"
         )
-    return await _final_verify_gate(mcp, target_object, result, standoff_m=standoff_m)
+        # Spin-search recovery puts the target back in view; reflect that
+        # in the structured target check so the result is internally
+        # consistent (success=True must not coexist with target=FAIL).
+        # The note records that this PASS came from the deterministic
+        # post-step, not from the agent's own observation.
+        for c in result.get("checks", []):
+            if c.get("name") == "target":
+                c["result"] = "PASS"
+                c["note"] = (
+                    f"recovered via runtime spin-search after the agent "
+                    f"reported FAIL: " + str(c.get("note", ""))
+                )
+                break
+    return await _final_verify_gate(mcp, object_name, result, standoff_m=standoff_m)
 
 
 async def _final_verify_gate(
     mcp: MCPClient,
-    target_object: str,
+    object_name: str,
     result: dict,
     standoff_m: float = 0.85,
 ) -> dict:
@@ -501,7 +511,7 @@ async def _final_verify_gate(
     """
     if not result.get("success"):
         return result
-    visible, info, calls = await _verify_target_visible(mcp, target_object)
+    visible, info, calls = await _verify_target_visible(mcp, object_name)
     result["tool_calls_used"] += calls
     if visible:
         # Drive to within `standoff_m` of the target so pick/place can
@@ -510,7 +520,7 @@ async def _final_verify_gate(
         # (pick/place._creep_closer); consolidating it here makes
         # pick/place pure manipulation.
         approach_ok, approach_info, approach_calls = await _approach_target(
-            mcp, target_object, standoff_m=standoff_m
+            mcp, object_name, standoff_m=standoff_m
         )
         result["tool_calls_used"] += approach_calls
         result["reason"] = (
@@ -524,7 +534,7 @@ async def _final_verify_gate(
             )
         return result
     logger.warning(
-        f"  [verify] OVERRIDE: navigator claimed SUCCESS but '{target_object}' "
+        f"  [verify] OVERRIDE: navigator claimed SUCCESS but '{object_name}' "
         f"is not segmentable — marking FAILURE"
     )
     result["success"] = False
@@ -539,32 +549,35 @@ async def _final_verify_gate(
 
 async def execute_navigate(
     mcp: MCPClient,
-    destination: str,
-    target_object: str,
+    target_area: str,
+    object_name: str,
+    mode: str,
     approach_pose: tuple[float, float, float] | None = None,
-    mode: str = "pick",
     model: str = None,
     max_tool_calls: int = 15,
 ) -> dict:
-    """Run a navigator agent to move the robot to a destination.
+    """Run a navigator agent to move the robot to a destination area.
 
     Args:
         mcp: Connected MCPClient instance.
-        destination: Natural language description of where to go.
-        target_object: Name of the object the navigator must see at the
-                       destination before reporting success. Required —
+        target_area: Natural language description of the destination area
+                       (e.g. "kids room", "living room near the coffee table").
+        object_name: Name of the object the navigator must see at the
+                       target_area before reporting success. Required —
                        a navigator with no specific target has nothing
-                       to verify against; use a destination tool only
-                       if pure relocation without target verification
-                       is actually what you want.
+                       to verify against; use a relocate-only tool if
+                       pure repositioning without target verification
+                       is what you want.
         approach_pose: Optional (x, y, yaw) in the map frame. If provided,
                        the navigator drives directly to this pose. If not,
                        the navigator reasons about where to go.
-        mode: What the next agent will do. Determines `_approach_target`
-              standoff via _STANDOFF_BY_MODE lookup. Valid values:
-              'pick' (0.85m), 'surface_place' (0.45m),
-              'container_place' (0.65m), 'floor_place' (0.85m).
-              Default 'pick' preserves legacy behavior.
+        mode: What the next subagent call will be. Determines
+              `_approach_target` standoff via _STANDOFF_BY_MODE lookup.
+              Required — picking the wrong mode silently delivers the
+              robot at the wrong standoff and the downstream pick/place
+              fails at its reach gate. Valid values: 'pick' (0.85m),
+              'surface_place' (0.45m), 'container_place' (0.65m),
+              'floor_place' (0.85m).
         model: LiteLLM model string. Defaults to LLM_MODEL env var.
         max_tool_calls: Safety cap on tool calls.
 
@@ -572,9 +585,9 @@ async def execute_navigate(
         {"success": bool, "error_code": str, "reason": str,
          "checks": list[dict], "tool_calls_used": int}
     """
-    if not target_object:
+    if not object_name:
         raise ValueError(
-            "execute_navigate requires a non-empty target_object. The "
+            "execute_navigate requires a non-empty object_name. The "
             "navigator's job is to put the target in view; without one "
             "it cannot verify arrival."
         )
@@ -593,8 +606,8 @@ async def execute_navigate(
     if approach_pose is not None:
         x, y, yaw = approach_pose
         user_message = (
-            f"Navigate to: \"{destination}\"\n"
-            f"Target object to find: \"{target_object}\"\n"
+            f"Navigate to: \"{target_area}\"\n"
+            f"Target object to find: \"{object_name}\"\n"
             f"Approach pose hint (map frame): x={x}, y={y}, yaw={yaw}\n\n"
             "Drive to the approach pose and verify you are at the right "
             "LOCATION (surface + room context) using look(camera=\"front\")."
@@ -602,17 +615,17 @@ async def execute_navigate(
         max_tool_calls = 15  # arm tuck + nav + look + recovery headroom
         logger.info(
             f"Navigator started (with pose hint): ({x}, {y}, {yaw}) "
-            f"dest='{destination}' target='{target_object}'"
+            f"area='{target_area}' target='{object_name}'"
         )
     else:
         user_message = (
-            f"Navigate to: \"{destination}\"\n"
-            f"Target object to find: \"{target_object}\"\n\n"
+            f"Navigate to: \"{target_area}\"\n"
+            f"Target object to find: \"{object_name}\"\n\n"
             "No approach pose provided. Use perception to orient yourself, "
-            "reason about where the destination is, navigate there, and "
+            "reason about where the target area is, navigate there, and "
             "verify arrival."
         )
-        logger.info(f"Navigator started (open): dest='{destination}' target='{target_object}'")
+        logger.info(f"Navigator started (open): area='{target_area}' target='{object_name}'")
 
     messages = [
         {"role": "system", "content": system_prompt},
@@ -642,7 +655,7 @@ async def execute_navigate(
                         "tool_calls_used": tool_call_count,
                     }
                     return await _try_spin_search(
-                        mcp, target_object, result, standoff_m=standoff_m
+                        mcp, object_name, result, standoff_m=standoff_m
                     )
 
             messages.append(assistant_message(response))
@@ -689,7 +702,7 @@ async def execute_navigate(
                 "tool_calls_used": tool_call_count,
             }
             return await _try_spin_search(
-                mcp, target_object, result, standoff_m=standoff_m
+                mcp, object_name, result, standoff_m=standoff_m
             )
         else:
             stop = response.choices[0].finish_reason
@@ -710,4 +723,4 @@ async def execute_navigate(
         "checks": [],
         "tool_calls_used": tool_call_count,
     }
-    return await _try_spin_search(mcp, target_object, result)
+    return await _try_spin_search(mcp, object_name, result)
