@@ -148,8 +148,9 @@ async def _approach_target(
     """Drive to ~standoff_m from the segmented target.
 
     Reads the cached segmentation centroid (set by the prior
-    segment_objects call from ``_verify_target_visible``), then
-    delegates to the shared ``nav2__approach_target`` MCP primitive.
+    segment_objects call in ``_final_verify_gate`` or in
+    ``_spin_search``), then delegates to the shared
+    ``nav2__approach_target`` MCP primitive.
 
     All three architectures (LLM + tools, multi-agent, skill-based) call
     the same primitive to ensure they implement approach identically.
@@ -309,98 +310,6 @@ async def _spin_search(
     return False, None, tool_calls
 
 
-async def _verify_target_visible(
-    mcp: MCPClient, object_name: str
-) -> tuple[bool, str, int]:
-    """Segmentation gate: object_name MUST be segmented on at least one
-    camera (arm preferred, front acceptable) before approach agent success is
-    accepted.
-
-    Architectural contract: the approach agent only guarantees that the target
-    is visible to the front camera at handoff. The pick/place agent owns
-    the fine-approach step (creep) and re-segments on the arm camera once
-    close. So a front-cam SUCCESS is sufficient — the pick agent will
-    drive in and resegment.
-
-    Arm-cam SUCCESS is treated as "even better" — it means the robot is
-    already in pick range and the handoff is golden.
-
-    Flow:
-      1. SAM3 on arm camera; on SUCCESS → accept (best handoff state).
-      2. SAM3 on front camera; on SUCCESS → accept (good handoff state —
-         approach agent will approach next).
-      3. If both miss, spin-search up to ``_VERIFY_SPIN_STEPS`` times.
-         Each spin: re-check arm cam first, then front cam. Accept the
-         first SUCCESS.
-      4. If still nothing, return False.
-
-    Returns: (visible, info, tool_calls_used)
-    """
-    tool_calls = 0
-
-    async def _seg(camera: str) -> str | None:
-        nonlocal tool_calls
-        try:
-            seg_raw = await mcp.call_tool_prefixed(
-                "perception__segment_objects",
-                {"prompt": object_name, "camera": camera, "timeout": 20},
-            )
-            tool_calls += 1
-            seg = json.loads(seg_raw) if isinstance(seg_raw, str) else seg_raw
-            status = seg.get("status", "UNKNOWN")
-            logger.info(
-                f"  [verify] SAM3 {camera} -> {status} for '{object_name}'"
-            )
-            return status
-        except Exception as e:
-            logger.error(f"  [verify] segmentation on {camera} failed: {e}")
-            tool_calls += 1
-            return None
-
-    # 1: arm cam (best handoff)
-    if await _seg("arm") == "SUCCESS":
-        return True, "verified on arm camera", tool_calls
-
-    # 2: front cam (acceptable — approach agent will approach)
-    if await _seg("front") == "SUCCESS":
-        return True, "verified on front camera (approach agent will approach)", tool_calls
-
-    # 3: spin-and-search — robot likely landed off-axis from nav2
-    _VERIFY_SPIN_STEPS = 6
-    _VERIFY_SPIN_ANGLE = 1.047  # ~60°
-    logger.info(
-        f"  [verify] both cameras missed; spin-searching up to "
-        f"{_VERIFY_SPIN_STEPS} × {_VERIFY_SPIN_ANGLE:.2f}rad for "
-        f"'{object_name}' (arm + front check each spin)"
-    )
-    for i in range(_VERIFY_SPIN_STEPS):
-        try:
-            await mcp.call_tool_prefixed(
-                "nav2__spin_robot", {"angle": _VERIFY_SPIN_ANGLE}
-            )
-            tool_calls += 1
-        except Exception as e:
-            logger.error(f"  [verify] spin {i+1} failed: {e}")
-            tool_calls += 1
-            continue
-        await _wait_until_still(mcp)
-        await asyncio.sleep(1.25)  # camera buffer flush after spin
-        if await _seg("arm") == "SUCCESS":
-            return (
-                True,
-                f"verified on arm camera after {i+1} spin(s)",
-                tool_calls,
-            )
-        if await _seg("front") == "SUCCESS":
-            return (
-                True,
-                f"verified on front camera after {i+1} spin(s) (approach agent will approach)",
-                tool_calls,
-            )
-
-    return False, "target not segmentable after spin-search", tool_calls
-
-
 async def _try_spin_search(
     mcp: MCPClient,
     object_name: str,
@@ -422,13 +331,14 @@ async def _try_spin_search(
       - LLM FAILURE + Check 1 FAIL (wrong area) → return FAILURE; the
         orchestrator will replan navigation.
 
-    The verify gate (``_final_verify_gate`` → ``_verify_target_visible``)
-    accepts SAM3 SUCCESS on either camera; approach agent approaches on arm
-    cam from there.
+    The final gate (``_final_verify_gate``) trusts the agent's own
+    look()+LLM-vision verification from step 3 (no runtime SAM3 re-verify).
+    It uses SAM3 only for COORDINATES (one segment call to populate the
+    centroid cache), then drives in via ``_approach_target``.
     """
     if result["success"]:
         logger.info(
-            f"  LLM saw '{object_name}' via look() — going to verify gate"
+            f"  LLM saw '{object_name}' via look() — driving to standoff"
         )
         return await _final_verify_gate(mcp, object_name, result, standoff_m=standoff_m)
 
@@ -495,13 +405,16 @@ async def _final_verify_gate(
     result: dict,
     standoff_m: float = 0.85,
 ) -> dict:
-    """Hard gate: a approach agent result with success=True is only accepted if
-    SAM3 can still segment the target on front or arm camera *right now*.
+    """Drive to standoff on agent success.
 
-    Pick / place will use the arm camera, so this is the ground-truth
-    contract: the target MUST be SAM3-segmentable at handoff. If both
-    cameras + a recovery spin-search miss, success is overturned to
-    FAILURE — even when the LLM's look() said it saw the target.
+    No runtime SAM3 re-verification of the agent's success claim — the
+    agent's own `look(camera="both")` + LLM-vision check (step 3) IS the
+    verification. SAM3 is unreliable for "is the target visible here
+    right now?" yes/no questions (see
+    `feedback_sam3_vs_look_primitive_selection.md`), so we trust the
+    LLM-vision check and only drive in. If the agent was wrong, the
+    downstream pick/place will fail at its own reach/visibility gate
+    and the orchestrator will re-call approach.
 
     Args:
         standoff_m: Target distance (meters) from segmented target after
@@ -511,38 +424,63 @@ async def _final_verify_gate(
     """
     if not result.get("success"):
         return result
-    visible, info, calls = await _verify_target_visible(mcp, object_name)
-    result["tool_calls_used"] += calls
-    if visible:
-        # Drive to within `standoff_m` of the target so pick/place can
-        # grasp/release directly without their own creep step. This was
-        # previously each manipulation agent's responsibility
-        # (pick/place._creep_closer); consolidating it here makes
-        # pick/place pure manipulation.
-        approach_ok, approach_info, approach_calls = await _approach_target(
-            mcp, object_name, standoff_m=standoff_m
-        )
-        result["tool_calls_used"] += approach_calls
-        result["reason"] = (
-            f"{result['reason']}\n\n[verify] {info}."
-            f"\n[approach] {approach_info}."
-        )
-        if not approach_ok:
-            logger.warning(
-                f"  [approach] FAILED: {approach_info} — handing off anyway "
-                f"(target was visible; pick may still succeed if reachable)"
+
+    # SAM3 segment to populate the cached centroid that _approach_target
+    # reads. SAM3 is used here for COORDINATES only (centroid xy for the
+    # approach driver), NOT as a yes/no visibility gate — the agent's
+    # own look(camera="both") + LLM-vision in step 3 is the verification.
+    # Arm cam preferred (best handoff state); front cam fallback.
+    segged_on = None
+    for camera in ("arm", "front"):
+        try:
+            seg_raw = await mcp.call_tool_prefixed(
+                "perception__segment_objects",
+                {"prompt": object_name, "camera": camera, "timeout": 20},
             )
+            result["tool_calls_used"] += 1
+            seg = json.loads(seg_raw) if isinstance(seg_raw, str) else seg_raw
+            if seg.get("status") == "SUCCESS":
+                segged_on = camera
+                logger.info(
+                    f"  [coords] SAM3 {camera} -> SUCCESS (centroid cached)"
+                )
+                break
+            else:
+                logger.info(
+                    f"  [coords] SAM3 {camera} -> {seg.get('status', 'UNKNOWN')}"
+                )
+        except Exception as e:
+            logger.error(f"  [coords] segment on {camera} failed: {e}")
+            result["tool_calls_used"] += 1
+
+    if segged_on is None:
+        logger.warning(
+            f"  [coords] SAM3 missed '{object_name}' on both cams — "
+            f"skipping approach drive. Agent's look() said target was visible, "
+            f"so handing off at the current pose; pick/place may still succeed."
+        )
+        result["reason"] = (
+            f"{result['reason']}\n\n"
+            f"[coords] SAM3 missed on both cams; no approach drive."
+        )
         return result
-    logger.warning(
-        f"  [verify] OVERRIDE: approach agent claimed SUCCESS but '{object_name}' "
-        f"is not segmentable — marking FAILURE"
+
+    # Drive to within `standoff_m` of the target so pick/place can
+    # grasp/release directly without their own creep step.
+    approach_ok, approach_info, approach_calls = await _approach_target(
+        mcp, object_name, standoff_m=standoff_m
     )
-    result["success"] = False
-    result["error_code"] = "NAV_VERIFY_OVERRIDE"
+    result["tool_calls_used"] += approach_calls
     result["reason"] = (
         f"{result['reason']}\n\n"
-        f"[verify] OVERRIDE — success rejected: {info}."
+        f"[coords] segmented on {segged_on} cam."
+        f"\n[approach] {approach_info}."
     )
+    if not approach_ok:
+        logger.warning(
+            f"  [approach] FAILED: {approach_info} — handing off anyway "
+            f"(agent reported target visible; pick may still succeed if reachable)"
+        )
     return result
 
 

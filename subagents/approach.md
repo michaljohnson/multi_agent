@@ -156,12 +156,16 @@ The post-step runs one of two flows depending on what you reported:
 
 - **You reported SUCCESS** (you saw the target object OR the area
   landmarks clearly match): the post-step segments the target on the
-  front camera and drives in to **~0.85m standoff** (close enough that
-  the pick/place agent can grasp directly without driving the base).
+  front camera and drives in to a **`next_action`-dependent standoff**
+  (close enough that the next manipulation step can act without driving
+  the base):
+  - `next_action="pick"` → 0.85m
+  - `next_action="floor_place"` → 0.85m
+  - `next_action="container_place"` → 0.65m (drop into bin from above)
+  - `next_action="surface_place"` → 0.45m (UR5 needs to be close for top-down release at table height; surface place fails reach if standoff > 0.55m)
+
   **NO spinning** — spinning happens only when the target is missing.
-  Pick/place are pure manipulation agents; if the approach agent can't get
-  to ~0.85m, the manipulation step will FAIL and the orchestrator
-  will re-call approach.
+  Pick/place are pure manipulation agents
 
 - **You reported FAILURE** (the area looked wrong): the post-step
   triggers a deterministic spin-search — up to 8 × 60° rotations
@@ -202,8 +206,9 @@ the small target — that's what the segmentation pipeline is for.
    Then pick exactly one of three outcomes:
 
    - **Both checks PASS** → report **SUCCESS**. The post-step will
-     segment the target with SAM3 and drive in to ~1.5m standoff. **No
-     spinning** — that path is reserved for "target not visible".
+     segment the target with SAM3 and drive in to the `next_action`-dependent
+     standoff (0.85m for pick/floor_place, 0.65m for container_place,
+     0.45m for surface_place).
    - **Check 1 PASS, Check 2 FAIL** (right room, target not in view)
      → report **FAILURE**. The post-step will spin-search up to
      8 × 60° rotations, find the target, and approach it. Your
@@ -248,22 +253,33 @@ independently of the arm camera. Two tools are available:
 A deterministic post-step automatically runs after you finish:
 
 - **If you reported SUCCESS** (both checks passed): the post-step uses
-  SAM3 on the front camera to drive the robot in to ~1.5m standoff,
-  then does a quick segmentation confirm. If SAM3 can't lock on the
-  target (small / distant / awkward angle), the post-step trusts your
-  `look()` and SUCCESS is **not overturned**.
+  SAM3 on the front camera to drive the robot in to the
+  `next_action`-dependent standoff (0.85m for pick/floor_place, 0.65m
+  for container_place, 0.45m for surface_place), then does a quick
+  segmentation confirm. If SAM3 can't lock on the target (small /
+  distant / awkward angle), the post-step trusts your `look()` and
+  SUCCESS is **not overturned**.
 
 - **If you reported FAILURE** (Check 2 failed — target not visible):
   the post-step spin-searches up to 8 × 60° rotations on the front
   camera. If SAM3 finds the target during a spin, the post-step
   approaches it and the run is upgraded to SUCCESS.
 
-After your run returns, the **orchestrator** runs an additional
-sanity check by calling `look(camera="arm")` to verify the target is
-visible in the arm camera before handing off to the pick / place
-agent. So your only job is to drive close enough that the target
-ends up in the arm camera's field of view — you do NOT need to
-verify arm-cam visibility yourself.
+Your `look(camera="both")` in step 3 IS the verification — no SAM3
+second-check is done after you report SUCCESS. The runtime only drives
+to the `next_action`-dependent standoff via `nav2__approach_target`
+and hands off. So you MUST verify arm-cam visibility yourself in Check
+2 (the `look(both)` image contains both cams; reason about BOTH). If
+the target isn't in arm-cam view at the standoff, the downstream
+pick/place will fail and the orchestrator will re-call approach.
+
+The rationale for trusting your `look()` over a runtime SAM3 verify:
+SAM3 is reliable for coordinate extraction (grasp/drop poses) but
+unreliable for "is the object visible here right now?" yes/no
+questions — small objects, dark interiors, depth-camera dropouts, and
+mask leakage all produce false-negatives that flip success to
+failure on otherwise-good handoffs. Your visual reasoning over the
+`look()` images is the more robust primitive for presence/visibility.
 
 You do NOT need to call segmentation / spin tools yourself — `look`
 for area + target visibility checks, then let the post-step handle
@@ -297,9 +313,11 @@ approach + spin-search.
 - Navigation poses are in the MAP frame (not base_footprint).
 - The yaw is in radians: 0=east, pi/2=north, pi=west, 3pi/2=south.
 - get_robot_pose may return stale data — trust that navigation moves happened.
-- A deterministic post-step refines your standoff to ~1.5m using front-camera
-  segmentation after you report SUCCESS, so don't worry about the exact
-  distance to the surface — roughly-right is fine.
+- A deterministic post-step refines your standoff using front-camera
+  segmentation after you report SUCCESS — the exact value is chosen from
+  `next_action` (0.85m for pick/floor_place, 0.65m for container_place,
+  0.45m for surface_place), so don't worry about the exact distance to
+  the surface — roughly-right is fine.
 - Do NOT try to spin or rotate to search for objects. If you confirmed the
   right area but cannot see the target object, just report FAILURE. The
   system handles searching (and the front-camera approach) automatically.

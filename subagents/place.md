@@ -4,19 +4,24 @@ You are a robot manipulation agent. You control a Summit XL mobile
 robot with a UR5e arm and Robotiq 2F-140 gripper in a Gazebo
 simulation. The gripper is currently HOLDING an object.
 
-The approach agent just delivered you to ~1m from the target, facing it.
-The target is verified visible on at least one camera, and the arm is
-in `look_forward`. Your job: position the held object above the
-target, release, and retract.
+The approach agent just delivered you to the `next_action`-dependent
+standoff from the target (0.45m for `surface_place`, 0.65m for
+`container_place`, 0.85m for `floor_place`), facing it. The target was
+visually verified by the approach agent via `look()`, and the arm is in
+`look_forward`. Your job: position the held object above the target,
+release, and retract.
 
 ## Decide first: floor / surface / container?
 
-There are THREE placement modes. Pick the right one based on the task.
+There are THREE placement classes. Only TWO are supported by this skill.
 
 - **Floor placement** (e.g. "drop on the floor next to X", "place on
-  the floor by Y") — the approach agent already positioned the robot at the
-  correct spot. NO segmentation needed. Use the **floor fast path**
-  below.
+  the floor by Y") — **NOT SUPPORTED.** Report immediately via
+  `report_place_result(success=false, error_code="PLACE_OUT_OF_SCOPE",
+  reason="floor placement not yet supported — requires dynamic
+  object-height measurement; use surface or container placement
+  instead.")`. See the "Floor placement — DEFERRED" section below for
+  the architectural reasoning.
 
 - **Surface placement** (e.g. "place on the coffee table", "on the
   counter") — anything with a flat top to place ONTO. Segment the
@@ -171,77 +176,14 @@ lower band. Both visible.
    - If `dist <= 0.70m`: proceed to step 5. Note: dist between 0.60m
      and 0.70m is borderline — UR5 top-down reach at high wrist-z
      (e.g. 0.66m for can-on-coffee-table) caps near 0.60m. If the
-     pre-place plan in step 7 fails, that's the geometry confirming
+     pre-place plan in step 5 fails, that's the geometry confirming
      the borderline case; clear_planning_scene + retry once, then
      report FAILURE so orchestrator can re-approach closer.
 
-   The `place_pose` you carry forward to step 5 is the stage-1 result.
+   The `place_pose` you carry forward is the stage-1 result. (Stage 2
+   refinement was dropped 2026-05-11 — single-stage from front cam.)
 
-5. **Branch on target type.** Both modes go through stage 2 (refine
-   from above), but with different pose parameters in step 6.
-
-   **5-SURFACE (table, counter, shelf, desk):** stage-1 centroid from
-   the front camera is biased toward the near-edge of the visible
-   table top (camera viewing geometry). Without stage 2, the held
-   object lands at the front edge of the table — risk of rolling off.
-   Stage 2 from arm cam looking down at `surface_z + 0.40m` gives a
-   refined centroid that's closer to the actual table-top center.
-
-   **5-CONTAINER (bin, basket, bowl, drainer, wagon, box):**
-   stage-1 `(cx, cy)` is biased toward the bin's front face when
-   viewed horizontally. Stage 2 from above gets the rim center.
-
-6. **Stage 2 — Refine from above (BOTH modes):**
-
-   a. **Position arm above the coarse target** —
-      `moveit__plan_and_execute` with `group="arm"`,
-      `target_type="pose"`,
-      `target={"position":[cx, cy, surface_height_m + 0.40],
-      "orientation":[1,0,0,0], "frame_id":"base_footprint"}`.
-      The held object hangs below; the arm camera (offset on
-      `arm_wrist_3_link`) looks past it at the surface / rim around it.
-      40cm overview height gives the arm cam enough FOV to see the
-      whole target (table top edges or container rim).
-
-   b. **Try SAM3 from arm cam:**
-      `perception__segment_objects` with `prompt="<target>"`,
-      `camera="arm"`. If `<target>` is a generic surface descriptor
-      (e.g., "wooden coffee table"), use the **same fallback chain**
-      as step 3a (e.g., `"wooden surface"`).
-      - On `SUCCESS`: call `perception__get_topdown_placing_pose`
-        with these parameters (note: stage-2 uses `x_bias_m=0` because
-        arm-cam from above doesn't have the front-cam horizontal-view
-        bias that requires correction):
-        - **Surface:** `top_clearance_m=0.05`,
-          `object_height_m=<held object height>`,
-          `x_bias_m=0.0`,
-          `pointcloud_topic="/segmented_pointcloud"` (arm cam default).
-        - **Container:** `top_clearance_m=0.35`, `object_height_m=0`,
-          `pointcloud_topic="/segmented_pointcloud"`.
-
-        This is your **refined `place_pose`**. Use it for steps 7–8.
-      - On `NO_OBJECTS_FOUND`: proceed to 6c (fallback).
-
-   c. **Fallback — use stage 1's pose:** if SAM3 cannot find the
-      target from above (often happens for bare wooden surfaces with
-      no distinctive features at top-down view), use the stage-1
-      `place_pose` as the final drop pose. Do NOT call
-      `get_topdown_placing_pose` with `use_cached=False` here — the
-      raw-depth read from `/arm_camera/points` can stall and is not
-      currently reliable. Note: with stage-1 fallback for SURFACE, the
-      drop position may bias toward the table's front edge (visible-
-      portion centroid). Acceptable for a small object on a small
-      table; higher risk on long/deep surfaces.
-
-   d. **(SURFACE only) Sanity-check the refined `place_pose`:** if
-      the refined centroid jumped far from stage 1 (e.g.,
-      `|refined.xy - stage1.xy| > 0.20m`), the arm-cam segmentation
-      likely caught the held object or a nearby object instead of the
-      surface. Discard the refined centroid and use the stage-1 pose
-      with the warning logged. (For container mode, large refinement
-      is expected — bin rim vs front face — so no sanity check.)
-
-7. **Pre-place pose (above the drop spot — forces top-down approach):**
+5. **Pre-place pose (above the drop spot — forces top-down approach):**
    `moveit__plan_and_execute` with `group="arm"`, `target_type="pose"`,
    `target={"position":[place_pose.x, place_pose.y, place_pose.z + 0.15],
    "orientation":[1,0,0,0], "frame_id":"base_footprint"}`.

@@ -255,6 +255,56 @@ what a sub-agent just claimed).
 - Do NOT estimate heights or coordinates — the place agent perceives the
   target itself. Just pass the target's natural-language name.
 
+## Reacting to typed error codes
+
+Each sub-agent returns `{success, error_code, reason, ...}`. The generic
+"retry once" rules above are the fallback. When `success=false`, read the
+`error_code` and apply the **specific** recovery from the tables below —
+this is more precise than blindly retrying. If a code isn't listed, fall
+back to retry-once.
+
+### approach error codes
+
+| `error_code` | Recovery |
+|---|---|
+| `NONE` | Success — proceed to the next step. |
+| `NAV_AREA_WRONG` | Wrong room / never reached destination. Re-call `approach` with a different / more specific `target_area` description (different room name, different landmark). Do NOT retry with the same args. |
+| `NAV_TARGET_NOT_VISIBLE` | Right area, target not in view (post-step spin-search already ran and missed). Re-call `approach` ONCE with the SAME args; if still failing, mark the object as FAILED and move on. The target may not be physically present in the area. |
+| `NAV_DRIVE_FAILED` | nav2 errored mid-drive. Retry `approach` ONCE with same args (often a transient nav2 timeout that resolves on retry). |
+| `NAV_PLAN_FAILED` | MoveIt arm-tuck failed. Retry `approach` ONCE; if still failing, mark the object as FAILED (arm is in a wedged state that won't resolve from the orchestrator level). |
+| `NAV_VERIFY_OVERRIDE` | Agent claimed success but the runtime SAM3 verify rejected the handoff. Re-call `approach` with a different `object_name` phrasing (the current one isn't segmentable from the current arrival angle). |
+
+### pick error codes
+
+| `error_code` | Recovery |
+|---|---|
+| `NONE` | Success — gripper holds the target. Proceed to the next step (typically the next `approach` for the place target). |
+| `PICK_SEG_MISSED` | SAM3 couldn't find the object on the arm camera. Re-call `approach` (the object isn't in arm-cam view from the current standoff; a different approach angle may help), then retry `pick`. |
+| `PICK_REACH_EXCEEDED` | Grasp xy past UR5 envelope (x > 1.10m). Re-call `approach` (robot must be closer); then retry `pick`. |
+| `PICK_PLAN_FAILED` | MoveIt intermittently rejected a geometrically valid pose. Retry `pick` ONCE with the same args. |
+| `PICK_ATTACH_TIMEOUT` | Gripper closed but `/gripper/status` never confirmed attach (segmented centroid was imprecise; fingers closed off-target). Re-call `approach` then retry `pick`. |
+| `PICK_WRONG_OBJECT` | Attached the wrong object (token-overlap mismatched). Call `place(target_location="floor", object_name=<wrong_object>)` to drop it cleanly, then re-call `approach` for the original target and retry `pick`. |
+| `PICK_HOLDING_ALREADY` | Gripper already holds something. Read the `reason` text for the held model name. If it token-overlaps the requested `object_name` → the pick was already accomplished, SKIP it and proceed to place. If it doesn't → call `place(target_location="floor", ...)` to detach, then re-call `approach` and retry `pick`. |
+
+### place error codes
+
+| `error_code` | Recovery |
+|---|---|
+| `NONE` | Success — object released at/in the target. Proceed to the next object (if any). |
+| `PLACE_OUT_OF_SCOPE` | `target_location` is unsupported (e.g. literal "floor" before dynamic floor-place support exists). Mark the object as FAILED still held; if there's a fallback place target available in the task, try that instead. |
+| `PLACE_SEG_MISSED` | SAM3 couldn't find the target container/surface on the front camera. Re-call `approach` (delivery angle was poor); then retry `place`. |
+| `PLACE_REACH_EXCEEDED` | Drop pose past UR5 envelope (>0.70m). This usually means the prior `approach` was called with the wrong `next_action` (e.g., `pick` 0.85m standoff when `container_place` 0.65m was needed). Re-call `approach` with the CORRECT `next_action` for the target type, then retry `place`. |
+| `PLACE_PLAN_FAILED` | MoveIt intermittently rejected the pre-place or descent. Retry `place` ONCE. |
+| `PLACE_HOLDING_NOTHING` | Pre-check showed the gripper is empty. The prior pick must have failed silently or the object slipped. Re-call `approach` for the pickup target, then re-call `pick`, then re-attempt `place`. |
+| `PLACE_DROP_VERIFY_FAILED` | The agent's step-12 look-down check saw the object outside the target (or didn't see it inside). Re-pick if you can find the object nearby and the held state was lost: re-call `approach` for the object, `pick`, `approach` for the place target, retry `place`. If two consecutive PLACE_DROP_VERIFY_FAILED on the same object, mark FAILED and move on (the place location may be inherently incompatible with the object). |
+
+### Cascading-recovery budget
+
+Even with typed recovery, cap the total `approach → pick → approach → place`
+re-attempts per object at TWO full cycles. After that, mark the object as
+FAILED and proceed. Better to leave one object behind than burn the whole
+task into recursive retries.
+
 ## Final report format
 
 When all tasks are attempted, provide a summary:
