@@ -30,12 +30,13 @@ There are THREE placement classes. Only TWO are supported by this skill.
   `get_topdown_placing_pose` is called with `object_height_m=<held
   object height>` so the tool computes a wrist-z that lands the
   released object at `surface + top_clearance_m`. Use the
-  **Unified procedure** below — it branches at step 5.
+  **Unified procedure** below — at step 3b pass surface params.
 
 - **Container** (bin, basket, bowl, drainer, wagon, box) — anything
-  with a hollow opening to drop INTO. Stage 1 segments the container
-  from the front cam, drop with `top_clearance_m=0.35` and
-  `object_height_m=0` (default). Use the **Unified procedure** below.
+  with a hollow opening to drop INTO. Segment the container from the
+  front cam, drop with `top_clearance_m=0.35` and `object_height_m=0`
+  (default). Use the **Unified procedure** below — at step 3b pass
+  container params.
 
 ## Floor placement — DEFERRED
 
@@ -158,12 +159,10 @@ lower band. Both visible.
       | small ball | 0.06 |
       | unknown small object | 0.10 (safe default) |
 
-      Take `coarse = (cx, cy, surface_height_m)` from the response.
-      For surface mode, `cx` already includes the +0.15m bias; pass
-      `place_pose` directly to MoveIt without further adjustment.
-      Stage 2 (arm-cam from above) refines for both modes; for
-      stage-2 SURFACE call set `x_bias_m=0.0` (arm-cam top-down view
-      doesn't have the horizontal-view bias).
+      Take `(cx, cy, surface_height_m)` from the response. Pass
+      `place_pose` directly to step 5 / step 6 — no further adjustment
+      needed. (Single-stage segmentation: stage-2 arm-cam refinement
+      was dropped 2026-05-11.)
 
 4. **Reach check on coarse xy.** `dist = sqrt(cx² + cy²)`.
    - If `dist > 0.70m`: report FAILURE. Place does NOT drive the base
@@ -192,7 +191,7 @@ lower band. Both visible.
    only the FINAL pose, not the trajectory. Without pre-place, MoveIt
    may swing the held object horizontally toward the target — held
    object hits the surface or container rim. Pre-place above forces
-   MoveIt to first lift the wrist over the target, then descent (step 8)
+   MoveIt to first lift the wrist over the target, then descent (step 6)
    approaches straight down.
 
    **If this plan fails** with `dist > UR5_reach_at_high_z`: the
@@ -201,38 +200,38 @@ lower band. Both visible.
    report FAILURE — orchestrator will re-call approach to bring the
    robot a few cm closer.
 
-8. **Execute drop pose (descend straight down):**
+6. **Execute drop pose (descend straight down):**
    `moveit__plan_and_execute` with `group="arm"`, `target_type="pose"`,
-   `target=<place_pose from step 3b or step 6>`. The place_pose
-   already includes the gripper finger offset, object height
-   (surface mode), and clearance — do NOT add further vertical
-   offset. The descent is small (~15cm) since pre-place already
-   positioned the wrist over the target.
+   `target=<place_pose from step 3b>`. The place_pose already includes
+   the gripper finger offset, object height (surface mode), and
+   clearance — do NOT add further vertical offset. The descent is
+   small (~15cm) since pre-place already positioned the wrist over
+   the target.
 
-9. **Force-detach** — `ros__publish_once` with
+7. **Force-detach** — `ros__publish_once` with
    `topic="/gripper/force_detach_str"`, `msg_type="std_msgs/msg/String"`,
    `msg={"data":"release"}`.
 
-10. **Open gripper** — `ros__send_action_goal` with
-    `action_name="/robotiq_gripper_controller/gripper_cmd"`,
-    `action_type="control_msgs/action/GripperCommand"`,
-    `goal={"command":{"position":0.0,"max_effort":50.0}}`.
+8. **Open gripper** — `ros__send_action_goal` with
+   `action_name="/robotiq_gripper_controller/gripper_cmd"`,
+   `action_type="control_msgs/action/GripperCommand"`,
+   `goal={"command":{"position":0.0,"max_effort":50.0}}`.
 
-11. **Lift clear (retract upward before transit):**
-    `moveit__plan_and_execute` to
-    `[place_pose.x, place_pose.y, place_pose.z + 0.15]` —
-    same xy, z bumped 15cm. Avoids dragging the gripper across the
-    just-released object on the way to look_forward. The arm now
-    looks straight down at the drop spot from ~15cm above — use this
-    vantage for the verification step below.
+9. **Lift clear (retract upward before transit):**
+   `moveit__plan_and_execute` to
+   `[place_pose.x, place_pose.y, place_pose.z + 0.15]` —
+   same xy, z bumped 15cm. Avoids dragging the gripper across the
+   just-released object on the way to look_forward. The arm now
+   looks straight down at the drop spot from ~15cm above — use this
+   vantage for the verification step below.
 
-12. **Verify drop landed in/on the target — visual look-down inspection.**
+10. **Verify drop landed in/on the target — visual look-down inspection.**
     Skip this step in surface mode if `target_location == "floor"`
     (out of scope). Otherwise run this for both container and surface
     modes; it is the gate on success.
 
     a. Get the arm camera image (you are already looking down at the
-       drop spot from step 11): `perception__look` with `camera="arm"`.
+       drop spot from step 9): `perception__look` with `camera="arm"`.
        The image is returned to you directly; reason on the pixels.
 
     b. Visually decide: is the `<object_name>` you were holding now
@@ -251,11 +250,11 @@ lower band. Both visible.
          cannot identify the object at all, treat as failure.
 
     c. Decide:
-       - On pass: continue to step 13, then call
+       - On pass: continue to step 11, then call
          `report_place_result` with `success=true`, `error_code="NONE"`,
          and a reason that names what you saw ("white cube visible
          inside the brown trash bin at the expected location").
-       - On fail: continue to step 13 (retract first), then call
+       - On fail: continue to step 11 (retract first), then call
          `report_place_result` with `success=false`,
          `error_code="PLACE_DROP_VERIFY_FAILED"`, and a reason that
          describes what you actually saw ("white cube visible on the
@@ -268,7 +267,7 @@ lower band. Both visible.
     centroid). A direct visual judgement on the arm-cam frame from
     above is more robust for in-container / on-surface verification.
 
-13. **Return to look_forward** — `moveit__plan_and_execute` with
+11. **Return to look_forward** — `moveit__plan_and_execute` with
     `group="arm"`, `target_type="joint_state"`,
     `target={"joint_positions":[-0.0001, -0.2429, -2.8291, -0.7983, 1.5622, 0.0]}`.
     If joint_state fails, fallback to `target_type="named_state"`,
@@ -277,22 +276,19 @@ lower band. Both visible.
 
 ## Critical rules
 
-- Stage 1 (coarse target lookup) uses the FRONT camera — at standoff
+- Target lookup uses the FRONT camera at `look_forward` — at standoff
   the held object hangs in front of the arm cam AND tall containers
-  extend above the arm-cam frame. Stage 2 (container refine) uses
-  the ARM camera from above. The earlier "arm-cam only" rule was
-  wrong and contradicted the procedure.
-- **BOTH modes use stage 1 + stage 2** (look-down from above to refine
-  centroid). Stage-1 (front cam horizontal) gets surface_height_m and a
-  rough xy biased toward the near edge. Stage-2 (arm cam at
-  `surface_z + 0.40m`) refines the xy by viewing the target from above
-  with wider FOV. If stage-2 SAM3 fails (bare wooden surfaces sometimes
-  don't anchor top-down), fall back to stage-1's pose; do NOT use
-  raw-depth (`use_cached=False`) — it stalls.
-- **Stage-2 sanity check for SURFACE only**: discard the refined
-  centroid if it jumped >20cm from stage 1 (likely caught held object
-  or nearby object). Use stage-1 instead and warn. For CONTAINER, big
-  jumps are expected (rim vs front face) — no sanity check.
+  extend above the arm-cam frame, so the wider front-cam FOV is
+  required to see both the held object AND the full target.
+- **Single-stage segmentation** (front cam only). The earlier two-stage
+  flow (front cam coarse → arm cam top-down refine) was dropped
+  2026-05-11 because:
+  * For container drops, the wrist sits 35cm above the rim and the
+    object falls in — front-cam centroid xy is forgiving enough.
+  * For surface drops, the front-cam centroid biases toward the
+    visible near-edge; `get_topdown_placing_pose` accepts an
+    `x_bias_m` parameter that compensates without a second SAM3 call.
+  * Saves ~3 tool calls per place run.
 - **`get_topdown_placing_pose` parameters by mode:**
   - Surface: `top_clearance_m=0.05` + `object_height_m=<held height>`.
     Tool computes `wrist_z = surface + 0.14 (finger) + object_height
@@ -305,7 +301,7 @@ lower band. Both visible.
   offset will cause a collision (too low) or an unreachable pose
   (too high).
 - **Top-down approach is enforced by the pre-place + descent split**
-  (step 7 + step 8). DO NOT plan directly to `place_pose` without
+  (step 5 + step 6). DO NOT plan directly to `place_pose` without
   the pre-place — the held object may swing horizontally into the
   target during the swing.
 - FRAME: Always use `base_footprint`, NEVER `odom` or `map`.
@@ -320,7 +316,7 @@ lower band. Both visible.
   `[-0.0001, -0.2429, -2.8291, -0.7983, 1.5622, 0.0]` if named state
   fails), then retry from step 3.
 - DO NOT hardcode drop coordinates. Always use the perception output.
-- Step 12 (visual look-down inspection from the lift-clear pose) is
+- Step 10 (visual look-down inspection from the lift-clear pose) is
   the ONLY success gate. It uses `perception__look(camera="arm")` to
   get the arm-cam image, and you decide visually whether the released
   object is inside/on the target. No SAM3 segmentation or geometric
