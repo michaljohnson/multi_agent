@@ -82,14 +82,13 @@ async def test_place(target_container: str, target_object: str | None = None):
 
 async def test_navigator(
     destination: str,
-    target_object: str | None = None,
+    target_object: str,
 ):
     """Test the navigator with a natural language destination (no orchestrator)."""
     from multi_agent.subagents.navigator import execute_navigate
 
     print(f"\n=== Testing navigator: '{destination}' ===")
-    if target_object:
-        print(f"    Target object: '{target_object}'")
+    print(f"    Target object: '{target_object}'")
     print()
 
     async with MCPClient() as mcp:
@@ -213,6 +212,12 @@ def main():
         asyncio.run(test_place(args.test_place, args.target_object))
     elif args.test_navigator:
         dest = " ".join(args.test_navigator)
+        if not args.target_object:
+            parser.error(
+                "--test-navigator requires --target-object (the navigator's "
+                "job is to put the target in view; without one it has nothing "
+                "to verify)"
+            )
         asyncio.run(test_navigator(dest, args.target_object))
     elif args.task:
         asyncio.run(run_full(args.task))

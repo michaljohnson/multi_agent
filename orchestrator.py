@@ -24,14 +24,13 @@ ORCHESTRATOR_TOOLS = [
             "name": "navigate",
             "description": (
                 "Navigate the robot to a destination. Spawns a navigator agent "
-                "that uses its own environment knowledge to drive there and "
-                "verifies arrival using perception. If target_object is given, "
-                "the navigator also closes to a mode-dependent standoff from "
-                "that object so the next step (pick or place) starts within "
-                "reach. The `mode` argument selects the standoff: 0.85m for "
-                "pick / floor_place, 0.65m for container_place, 0.45m for "
-                "surface_place (UR5 needs to be close for top-down release at "
-                "table height)."
+                "that uses its own environment knowledge to drive there, "
+                "verifies the area by camera, and closes to a mode-dependent "
+                "standoff from the target_object so the next step (pick or "
+                "place) starts within reach. The `mode` argument selects the "
+                "standoff: 0.85m for pick / floor_place, 0.65m for "
+                "container_place, 0.45m for surface_place (UR5 needs to be "
+                "close for top-down release at table height)."
             ),
             "parameters": {
                 "type": "object",
@@ -46,15 +45,15 @@ ORCHESTRATOR_TOOLS = [
                     "target_object": {
                         "type": "string",
                         "description": (
-                            "Optional. A visible landmark the navigator "
-                            "should stop close to (SAM3-verified + standoff). "
-                            "Before a floor pickup: pass the object itself "
-                            "(e.g. 'red ball'). Before a place: pass the "
-                            "container or surface name (e.g. 'trash bin', "
-                            "'wooden coffee table'). Omit only when no specific "
-                            "landmark exists. (Surface pickups do NOT call "
-                            "navigate at all — the user pre-positions the robot "
-                            "next to the surface.)"
+                            "Required. The visible landmark the navigator "
+                            "must put in view (SAM3-verified) and close to "
+                            "the standoff. Before a floor pickup: pass the "
+                            "object itself (e.g. 'red ball'). Before a place: "
+                            "pass the container or surface name (e.g. "
+                            "'trash bin', 'wooden coffee table'). "
+                            "(Surface pickups do NOT call navigate at all — "
+                            "the user pre-positions the robot next to the "
+                            "surface.)"
                         ),
                     },
                     "mode": {
@@ -77,7 +76,7 @@ ORCHESTRATOR_TOOLS = [
                         ),
                     },
                 },
-                "required": ["destination"],
+                "required": ["destination", "target_object"],
             },
         },
     },
@@ -168,7 +167,7 @@ async def _handle_tool_call(
         result = await execute_navigate(
             mcp=mcp,
             destination=tool_input["destination"],
-            target_object=tool_input.get("target_object"),
+            target_object=tool_input["target_object"],
             mode=tool_input.get("mode", "pick"),
             model=navigator_model,
         )

@@ -2,7 +2,6 @@ import asyncio
 import json
 import logging
 import math
-import re
 import time
 
 from multi_agent.clients.llm import (
@@ -24,10 +23,85 @@ NAVIGATOR_TOOLS = {
     "perception__look",
 }
 
+# Virtual termination tool. The agent calls this as its last action; the
+# runtime intercepts the call (it is NOT dispatched to MCP) and returns its
+# args as the subagent's result. Replaces regex-scraping of free-text
+# "SUCCESS:" / "FAILURE:" sentinels and the separate Check 1 / Check 2
+# PASS/FAIL extractor: both pieces of state are now structured tool-call
+# args (success bool + checks[] array), not prose to be parsed.
+REPORT_NAVIGATION_RESULT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "report_navigation_result",
+        "description": (
+            "Finish the navigation. The args you pass ARE the subagent's "
+            "return value to the orchestrator. Call this exactly once as "
+            "your final action. Do NOT emit free-text SUCCESS:/FAILURE: "
+            "lines anymore. The structured 'checks' array replaces the "
+            "old 'Check 1 (area): PASS/FAIL — ...' reasoning block."
+        ),
+        "parameters": {
+            "type": "object",
+            "required": ["success", "error_code", "reason", "checks"],
+            "properties": {
+                "success": {
+                    "type": "boolean",
+                    "description": (
+                        "True only if Check 1 (area) PASS AND Check 2 (target) PASS."
+                    ),
+                },
+                "error_code": {
+                    "type": "string",
+                    "enum": [
+                        "NONE",
+                        "NAV_AREA_WRONG",
+                        "NAV_TARGET_NOT_VISIBLE",
+                        "NAV_DRIVE_FAILED",
+                        "NAV_PLAN_FAILED",
+                        "NAV_VERIFY_OVERRIDE",
+                    ],
+                    "description": "Use NONE on success; otherwise pick the most specific failure code.",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "One or two sentences justifying the result.",
+                },
+                "checks": {
+                    "type": "array",
+                    "description": (
+                        "Per-check breakdown. Always include both entries "
+                        "(name='area' and name='target') with result in "
+                        "{PASS, FAIL}. A target_object is always supplied."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "required": ["name", "result"],
+                        "properties": {
+                            "name": {"type": "string", "enum": ["area", "target"]},
+                            "result": {"type": "string", "enum": ["PASS", "FAIL"]},
+                            "note": {"type": "string"},
+                        },
+                    },
+                },
+            },
+        },
+    },
+}
+
 
 def _filter_tools(all_tools: list[dict]) -> list[dict]:
     """Filter to only the tools the navigator needs."""
     return [t for t in all_tools if t["function"]["name"] in NAVIGATOR_TOOLS]
+
+
+def _check_result(checks: list[dict], name: str) -> str:
+    """Return the 'result' field for a named check ('PASS' / 'FAIL' / 'SKIP'),
+    or 'UNKNOWN' if the check is missing.
+    """
+    for c in checks or []:
+        if c.get("name") == name:
+            return str(c.get("result", "UNKNOWN")).upper()
+    return "UNKNOWN"
 
 
 def _parse_robot_pose(raw) -> tuple[float | None, float | None, float | None]:
@@ -352,9 +426,6 @@ async def _try_spin_search(
     accepts SAM3 SUCCESS on either camera; navigator approaches on arm
     cam from there.
     """
-    if not target_object:
-        return result
-
     if result["success"]:
         logger.info(
             f"  LLM saw '{target_object}' via look() — going to verify gate"
@@ -371,23 +442,19 @@ async def _try_spin_search(
     #     we don't actually know if we're in the right area. Spin-search
     #     is cheap insurance — try it. If we're in the wrong room SAM3
     #     just won't anchor, and the gate FAILS cleanly anyway.
-    reason_text = result.get("reason", "")
-    check1_match = re.search(
-        r"Check\s*1[^\n]*?(PASS|FAIL)", reason_text, re.IGNORECASE
-    )
-    check1_explicit_fail = bool(
-        check1_match and check1_match.group(1).upper() == "FAIL"
-    )
-    if check1_explicit_fail:
+    area_check = _check_result(result.get("checks", []), "area")
+    if area_check == "FAIL":
         logger.info(
             f"  Check 1 (area) reported FAIL; skipping spin-search "
             f"(robot is not in the right area)"
         )
         result["reason"] = (
-            f"{reason_text}\n\n"
+            f"{result.get('reason', '')}\n\n"
             f"[post] Check 1 (area) failed — skipped spin-search; "
             f"orchestrator should retry navigation."
         )
+        if result.get("error_code", "NONE") == "NONE":
+            result["error_code"] = "NAV_AREA_WRONG"
         return result
 
     logger.info(
@@ -401,6 +468,10 @@ async def _try_spin_search(
             f"  Found '{target_object}' via spin — handing off to verify gate"
         )
         result["success"] = True
+        # Recovery clears the agent's failure error code; reason text below
+        # records that the runtime recovered, the original checks[] stay as
+        # the agent's honest observation at termination time.
+        result["error_code"] = "NONE"
         result["reason"] = (
             f"Found '{target_object}' after spin-search. "
             f"Scene: {scene_text[:400] if scene_text else 'N/A'}"
@@ -457,9 +528,10 @@ async def _final_verify_gate(
         f"is not segmentable — marking FAILURE"
     )
     result["success"] = False
+    result["error_code"] = "NAV_VERIFY_OVERRIDE"
     result["reason"] = (
         f"{result['reason']}\n\n"
-        f"[verify] OVERRIDE — SUCCESS rejected: {info}."
+        f"[verify] OVERRIDE — success rejected: {info}."
     )
     return result
 
@@ -468,7 +540,7 @@ async def _final_verify_gate(
 async def execute_navigate(
     mcp: MCPClient,
     destination: str,
-    target_object: str | None = None,
+    target_object: str,
     approach_pose: tuple[float, float, float] | None = None,
     mode: str = "pick",
     model: str = None,
@@ -479,9 +551,12 @@ async def execute_navigate(
     Args:
         mcp: Connected MCPClient instance.
         destination: Natural language description of where to go.
-        target_object: Optional name of the object to find at the
-                       destination. If provided, navigator must see it
-                       before reporting success.
+        target_object: Name of the object the navigator must see at the
+                       destination before reporting success. Required —
+                       a navigator with no specific target has nothing
+                       to verify against; use a destination tool only
+                       if pure relocation without target verification
+                       is actually what you want.
         approach_pose: Optional (x, y, yaw) in the map frame. If provided,
                        the navigator drives directly to this pose. If not,
                        the navigator reasons about where to go.
@@ -494,8 +569,16 @@ async def execute_navigate(
         max_tool_calls: Safety cap on tool calls.
 
     Returns:
-        {"success": bool, "reason": str, "tool_calls_used": int}
+        {"success": bool, "error_code": str, "reason": str,
+         "checks": list[dict], "tool_calls_used": int}
     """
+    if not target_object:
+        raise ValueError(
+            "execute_navigate requires a non-empty target_object. The "
+            "navigator's job is to put the target in view; without one "
+            "it cannot verify arrival."
+        )
+
     standoff_m = _STANDOFF_BY_MODE.get(mode, 0.85)
     if mode not in _STANDOFF_BY_MODE:
         logger.warning(
@@ -503,7 +586,7 @@ async def execute_navigate(
         )
 
     all_tools = mcp.get_tools()
-    tools = _filter_tools(all_tools)
+    tools = _filter_tools(all_tools) + [REPORT_NAVIGATION_RESULT_TOOL]
 
     system_prompt = _SKILL_FILE.read_text()
 
@@ -511,6 +594,7 @@ async def execute_navigate(
         x, y, yaw = approach_pose
         user_message = (
             f"Navigate to: \"{destination}\"\n"
+            f"Target object to find: \"{target_object}\"\n"
             f"Approach pose hint (map frame): x={x}, y={y}, yaw={yaw}\n\n"
             "Drive to the approach pose and verify you are at the right "
             "LOCATION (surface + room context) using look(camera=\"front\")."
@@ -518,16 +602,12 @@ async def execute_navigate(
         max_tool_calls = 15  # arm tuck + nav + look + recovery headroom
         logger.info(
             f"Navigator started (with pose hint): ({x}, {y}, {yaw}) "
-            f"dest='{destination}'"
+            f"dest='{destination}' target='{target_object}'"
         )
     else:
-        target_line = (
-            f"\nTarget object to find: \"{target_object}\"\n"
-            if target_object else ""
-        )
         user_message = (
             f"Navigate to: \"{destination}\"\n"
-            f"{target_line}\n"
+            f"Target object to find: \"{target_object}\"\n\n"
             "No approach pose provided. Use perception to orient yourself, "
             "reason about where the destination is, navigate there, and "
             "verify arrival."
@@ -544,6 +624,27 @@ async def execute_navigate(
         response = call_llm(messages=messages, tools=tools, model=model)
 
         if wants_tool_use(response):
+            # If report_navigation_result appears in this batch, terminate
+            # immediately with its args; any other tool calls in the same
+            # batch are discarded — the subagent's intent is to finish.
+            for tc_id, tc_name, tc_args in get_tool_calls(response):
+                if tc_name == "report_navigation_result":
+                    tool_call_count += 1
+                    logger.info(
+                        f"  [nav {tool_call_count}] report_navigation_result"
+                        f"({json.dumps(tc_args)[:300]})"
+                    )
+                    result = {
+                        "success": bool(tc_args.get("success", False)),
+                        "error_code": tc_args.get("error_code", "NONE"),
+                        "reason": tc_args.get("reason", ""),
+                        "checks": tc_args.get("checks", []),
+                        "tool_calls_used": tool_call_count,
+                    }
+                    return await _try_spin_search(
+                        mcp, target_object, result, standoff_m=standoff_m
+                    )
+
             messages.append(assistant_message(response))
 
             tool_results = []
@@ -573,33 +674,40 @@ async def execute_navigate(
 
         elif is_done(response):
             final_text = get_text_content(response)
-            logger.info(f"Navigator finished:\n{final_text}")
-
-            # Find last standalone SUCCESS/FAILURE word (not "successfully" etc.)
-            s_matches = list(re.finditer(r'\bSUCCESS\b', final_text, re.IGNORECASE))
-            f_matches = list(re.finditer(r'\bFAILURE\b', final_text, re.IGNORECASE))
-            last_s = s_matches[-1].start() if s_matches else -1
-            last_f = f_matches[-1].start() if f_matches else -1
-            success = last_s > last_f
+            logger.warning(
+                f"Navigator exited without calling report_navigation_result. "
+                f"Treating as failure. Last text: {final_text[:500]}"
+            )
             result = {
-                "success": success,
-                "reason": final_text,
+                "success": False,
+                "error_code": "NONE",
+                "reason": (
+                    "Subagent exited without calling report_navigation_result. "
+                    f"Last text: {final_text}"
+                ),
+                "checks": [],
                 "tool_calls_used": tool_call_count,
             }
-            return await _try_spin_search(mcp, target_object, result, standoff_m=standoff_m)
+            return await _try_spin_search(
+                mcp, target_object, result, standoff_m=standoff_m
+            )
         else:
             stop = response.choices[0].finish_reason
             logger.warning(f"Unexpected finish_reason: {stop}")
             return {
                 "success": False,
+                "error_code": "NONE",
                 "reason": f"Unexpected stop: {stop}",
+                "checks": [],
                 "tool_calls_used": tool_call_count,
             }
 
     logger.warning(f"Navigator hit max tool calls ({max_tool_calls})")
     result = {
         "success": False,
+        "error_code": "NONE",
         "reason": f"Exceeded maximum tool calls ({max_tool_calls})",
+        "checks": [],
         "tool_calls_used": tool_call_count,
     }
     return await _try_spin_search(mcp, target_object, result)

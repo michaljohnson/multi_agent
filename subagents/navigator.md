@@ -214,15 +214,22 @@ the small target — that's what the segmentation pipeline is for.
    Do NOT call `nav2__spin_robot` yourself — spinning is the
    post-step's job, not yours.
 
-4. **Report** in this exact format:
-   ```
-   Check 1 (area): PASS/FAIL — <what landmarks you matched>
-   Check 2 (target): PASS/FAIL — <whether the target is visible>
-   SUCCESS/FAILURE: <one sentence>
-   ```
+4. **Report** by calling `report_navigation_result(...)` with:
+   - `success` (bool): `true` iff Check 1 PASS AND Check 2 PASS.
+   - `error_code` (enum): `NONE` on success. On failure:
+     - `NAV_AREA_WRONG` — Check 1 (area) FAIL (wrong room).
+     - `NAV_TARGET_NOT_VISIBLE` — Check 1 PASS but Check 2 (target) FAIL.
+     - `NAV_DRIVE_FAILED` — nav2 reported a drive error you could not recover from.
+     - `NAV_PLAN_FAILED` — MoveIt plan failed (arm tucking pre-nav).
+   - `reason` (str): one sentence summarising the outcome.
+   - `checks` (array): always include both entries:
+     - `{"name": "area", "result": "PASS"|"FAIL", "note": "<landmarks you matched>"}`
+     - `{"name": "target", "result": "PASS"|"FAIL", "note": "<visibility>"}`
 
-   Map SUCCESS / FAILURE strictly: SUCCESS = both checks PASS;
-   FAILURE = anything else.
+   You may still REASON about Check 1 / Check 2 in your turn before
+   calling the tool — that thinking is useful. Just put the conclusion
+   into the structured args, do not emit a "Check 1 (area): PASS — ..."
+   text block as the parser no longer reads it.
 
 ---
 
@@ -304,6 +311,20 @@ approach + spin-search.
 
 ## Reporting
 
-When done, respond with EXACTLY one of:
-- "SUCCESS: <brief description of where the robot is now>"
-- "FAILURE: <brief description of what went wrong>"
+When done, **call `report_navigation_result(success=..., error_code=..., reason=..., checks=...)`** as your final tool call. The args ARE the subagent's return value to the orchestrator. Do NOT emit free-text "SUCCESS:" or "FAILURE:" lines — the runtime no longer parses them.
+
+`success` is `true` only when:
+- Check 1 (area) PASS — the front-camera scene matches the destination's landmarks, AND
+- Check 2 (target) PASS — `target_object` is visible.
+
+A `target_object` is always supplied; navigation's job is to put it in view for the next manipulation step.
+
+Otherwise `success` is `false` with the most specific `error_code`:
+- `NAV_AREA_WRONG` — Check 1 FAIL (wrong room / never reached destination).
+- `NAV_TARGET_NOT_VISIBLE` — Check 1 PASS, Check 2 FAIL (right area but target not in current camera view; the deterministic post-step will run a spin-search).
+- `NAV_DRIVE_FAILED` — nav2 errored unrecoverably.
+- `NAV_PLAN_FAILED` — MoveIt arm-tuck plan failed.
+
+The `checks` array always contains both `area` and `target` entries with `PASS`/`FAIL`/`SKIP` results so the post-step can decide between spin-search (target missing in right area) and abort (wrong area entirely).
+
+Anywhere this skill text says "report SUCCESS" or "report FAILURE", it means **call `report_navigation_result`** with the appropriate `success` and `error_code`.
