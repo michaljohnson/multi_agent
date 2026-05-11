@@ -379,18 +379,12 @@ lower band. Both visible.
   fails), then retry from step 3.
 - DO NOT hardcode drop coordinates. Always use the perception output.
 - Step 12 (visual look-down inspection from the lift-clear pose) is
-  the PRIMARY success gate. It uses `perception__look(camera="arm")`
-  to get the arm-cam image, and you decide visually whether the
-  released object is inside/on the target. No SAM3 segmentation or
-  geometric xy compare for verification — direct image reasoning is
-  more robust for small objects in dark containers.
-- A second-line runtime post-step ALSO runs after `report_place_result`:
-  it re-segments the held object on the FRONT camera and overrides
-  `success=true` to `success=false, error_code="PLACE_DROP_VERIFY_FAILED"`
-  if the object is still visible there. This catches cases where the
-  object bounced clear of the drop area and ended up visible on the
-  body-mounted camera. Treat it as belt-and-suspenders; step 12 is
-  what you control directly.
+  the ONLY success gate. It uses `perception__look(camera="arm")` to
+  get the arm-cam image, and you decide visually whether the released
+  object is inside/on the target. No SAM3 segmentation or geometric
+  xy compare for verification — direct image reasoning is more robust
+  for small objects in dark containers, and uses the right primitive
+  for the question shape (presence/containment, not coordinates).
 - If `plan_and_execute` to the final drop pose fails and you cannot
   recover, report FAILURE rather than releasing at a fallback pose —
   dropping the object in the wrong place is worse than not dropping
