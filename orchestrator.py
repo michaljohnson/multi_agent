@@ -219,7 +219,10 @@ async def run_orchestrator(
         max_turns: Safety cap on orchestrator turns.
 
     Returns:
-        {"summary": str, "turns_used": int}
+        {"summary": str, "turns_used": int, "subagent_tool_calls_total": int}
+        where subagent_tool_calls_total sums the MCP tool calls each
+        sub-agent reported via its `tool_calls_used` field, across every
+        sub-agent invocation in this run.
     """
     system_prompt = _SKILL_FILE.read_text()
     all_tools = ORCHESTRATOR_TOOLS
@@ -229,6 +232,7 @@ async def run_orchestrator(
         {"role": "user", "content": task},
     ]
     turn_count = 0
+    subagent_tool_calls_total = 0
 
     logger.info(f"Orchestrator started: {task[:200]}")
 
@@ -254,6 +258,14 @@ async def run_orchestrator(
                     mcp, tc_name, tc_args,
                     executor_model, approach_model,
                 )
+                # Aggregate sub-agent tool_calls_used into the orchestrator's
+                # total. Each sub-agent's result JSON contains a
+                # tool_calls_used int; sum across every dispatch.
+                try:
+                    parsed = json.loads(result)
+                    subagent_tool_calls_total += int(parsed.get("tool_calls_used", 0))
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    pass
                 tool_results.append(tool_result_message(tc_id, result))
 
             messages.extend(tool_results)
@@ -264,6 +276,7 @@ async def run_orchestrator(
             return {
                 "summary": final_text,
                 "turns_used": turn_count,
+                "subagent_tool_calls_total": subagent_tool_calls_total,
             }
         else:
             stop = response.choices[0].finish_reason
@@ -271,10 +284,12 @@ async def run_orchestrator(
             return {
                 "summary": f"Unexpected stop: {stop}",
                 "turns_used": turn_count,
+                "subagent_tool_calls_total": subagent_tool_calls_total,
             }
 
     logger.warning(f"Orchestrator hit max turns ({max_turns})")
     return {
         "summary": f"Exceeded maximum turns ({max_turns})",
         "turns_used": turn_count,
+        "subagent_tool_calls_total": subagent_tool_calls_total,
     }
