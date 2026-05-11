@@ -1,6 +1,5 @@
 import json
 import logging
-import re
 
 from multi_agent.clients.llm import (
     call_llm, wants_tool_use, is_done, get_tool_calls,
@@ -16,12 +15,62 @@ _SKILL_FILE = Path(__file__).parent / "place.md"
 PLACE_TOOLS = {
     "perception__segment_objects",
     "perception__get_topdown_placing_pose",
+    "perception__look",
     "moveit__plan_and_execute",
     "moveit__get_current_pose",
     "moveit__clear_planning_scene",
     "ros__call_service",
     "ros__send_action_goal",
     "ros__publish_once",
+}
+
+# Virtual termination tool. The agent calls this as its last action; the
+# runtime intercepts the call (it is NOT dispatched to MCP) and returns its
+# args as the subagent's result. Replaces regex-scraping of free-text
+# "SUCCESS:" / "FAILURE:" sentinels: the agent's structured intent lives in
+# tool-call args, not in prose.
+REPORT_PLACE_RESULT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "report_place_result",
+        "description": (
+            "Finish the place. The args you pass ARE the subagent's return "
+            "value to the orchestrator. Call this exactly once as your "
+            "final action. Do NOT emit free-text SUCCESS:/FAILURE: lines."
+        ),
+        "parameters": {
+            "type": "object",
+            "required": ["success", "error_code", "reason"],
+            "properties": {
+                "success": {
+                    "type": "boolean",
+                    "description": (
+                        "True only if the held object was released at the "
+                        "intended drop pose and the arm retracted to "
+                        "look_forward. A post-step visibility verifier may "
+                        "still override this to false."
+                    ),
+                },
+                "error_code": {
+                    "type": "string",
+                    "enum": [
+                        "NONE",
+                        "PLACE_OUT_OF_SCOPE",
+                        "PLACE_SEG_MISSED",
+                        "PLACE_REACH_EXCEEDED",
+                        "PLACE_PLAN_FAILED",
+                        "PLACE_HOLDING_NOTHING",
+                        "PLACE_DROP_VERIFY_FAILED",
+                    ],
+                    "description": "Use NONE on success; otherwise pick the most specific failure code.",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "One or two sentences justifying the result.",
+                },
+            },
+        },
+    },
 }
 
 
@@ -107,16 +156,26 @@ async def execute_place(
         max_tool_calls: Safety cap on tool calls to prevent runaway.
 
     Returns:
-        {"success": bool, "reason": str, "tool_calls_used": int}
+        {"success": bool, "error_code": str, "reason": str, "tool_calls_used": int}
     """
     all_tools = mcp.get_tools()
-    tools = _filter_tools(all_tools)
+    tools = _filter_tools(all_tools) + [REPORT_PLACE_RESULT_TOOL]
 
     system_prompt = _SKILL_FILE.read_text()
-    user_message = (
-        f"Place the currently held object on/into the '{target_container}' "
-        f"in front of you."
-    )
+    if object_name:
+        user_message = (
+            f"Place the currently held '{object_name}' on/into the "
+            f"'{target_container}' in front of you. Use '{object_name}' as "
+            f"the SAM3 prompt for the step 12 look-down verification."
+        )
+    else:
+        user_message = (
+            f"Place the currently held object on/into the '{target_container}' "
+            f"in front of you. NOTE: no object_name was supplied, so the "
+            f"step 12 look-down verification gate cannot run — report "
+            f"success=false, error_code=PLACE_DROP_VERIFY_FAILED if you "
+            f"cannot otherwise confirm the drop landed in the target."
+        )
 
     messages = [
         {"role": "system", "content": system_prompt},
@@ -130,6 +189,49 @@ async def execute_place(
         response = call_llm(messages=messages, tools=tools, model=model)
 
         if wants_tool_use(response):
+            # If report_place_result appears in this batch, terminate
+            # immediately with its args; any other tool calls in the same
+            # batch are discarded — the subagent's intent is to finish.
+            for tc_id, tc_name, tc_args in get_tool_calls(response):
+                if tc_name == "report_place_result":
+                    tool_call_count += 1
+                    logger.info(
+                        f"  [{tool_call_count}] report_place_result"
+                        f"({json.dumps(tc_args)[:200]})"
+                    )
+                    result = {
+                        "success": bool(tc_args.get("success", False)),
+                        "error_code": tc_args.get("error_code", "NONE"),
+                        "reason": tc_args.get("reason", ""),
+                        "tool_calls_used": tool_call_count,
+                    }
+
+                    # Post-step ground-truth check: when the agent claimed
+                    # success AND the held object is named, segment for it
+                    # on the front camera. If still visible there, the agent
+                    # lied (Gap A) and we override to a typed verify failure.
+                    if result["success"] and object_name:
+                        verified, info = await _verify_object_placed(mcp, object_name)
+                        logger.info(f"  [verify-place] {info}")
+                        if not verified:
+                            logger.warning(
+                                f"  [verify-place] OVERRIDE: agent claimed "
+                                f"success but '{object_name}' is still "
+                                f"visible on front camera"
+                            )
+                            result["success"] = False
+                            result["error_code"] = "PLACE_DROP_VERIFY_FAILED"
+                            result["reason"] = (
+                                f"{result['reason']}\n\n"
+                                f"[verify] OVERRIDE — success rejected: {info}."
+                            )
+                        else:
+                            result["reason"] = (
+                                f"{result['reason']}\n\n[verify] {info}."
+                            )
+
+                    return result
+
             messages.append(assistant_message(response))
 
             tool_results = []
@@ -154,41 +256,25 @@ async def execute_place(
 
         elif is_done(response):
             final_text = get_text_content(response)
-            logger.info(f"Place finished:\n{final_text}")
-
-            s_matches = list(re.finditer(r'\bSUCCESS\b', final_text, re.IGNORECASE))
-            f_matches = list(re.finditer(r'\bFAILURE\b', final_text, re.IGNORECASE))
-            last_s = s_matches[-1].start() if s_matches else -1
-            last_f = f_matches[-1].start() if f_matches else -1
-            success = last_s > last_f
-
-            result = {
-                "success": success,
-                "reason": final_text,
+            logger.warning(
+                f"Place exited without calling report_place_result. "
+                f"Treating as failure. Last text: {final_text[:500]}"
+            )
+            return {
+                "success": False,
+                "error_code": "NONE",
+                "reason": (
+                    "Subagent exited without calling report_place_result. "
+                    f"Last text: {final_text}"
+                ),
                 "tool_calls_used": tool_call_count,
             }
-
-            if success and object_name:
-                verified, info = await _verify_object_placed(mcp, object_name)
-                logger.info(f"  [verify-place] {info}")
-                if not verified:
-                    logger.warning(
-                        f"  [verify-place] OVERRIDE: agent claimed SUCCESS but "
-                        f"'{object_name}' is still visible on front camera"
-                    )
-                    result["success"] = False
-                    result["reason"] = (
-                        f"{final_text}\n\n[verify] OVERRIDE — SUCCESS rejected: {info}."
-                    )
-                else:
-                    result["reason"] = f"{final_text}\n\n[verify] {info}."
-
-            return result
         else:
             stop = response.choices[0].finish_reason
             logger.warning(f"Unexpected finish_reason: {stop}")
             return {
                 "success": False,
+                "error_code": "NONE",
                 "reason": f"Unexpected stop: {stop}",
                 "tool_calls_used": tool_call_count,
             }
@@ -196,6 +282,7 @@ async def execute_place(
     logger.warning(f"Place hit max tool calls ({max_tool_calls})")
     return {
         "success": False,
+        "error_code": "NONE",
         "reason": f"Exceeded maximum tool calls ({max_tool_calls})",
         "tool_calls_used": tool_call_count,
     }

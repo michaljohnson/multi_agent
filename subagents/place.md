@@ -280,9 +280,53 @@ lower band. Both visible.
     `moveit__plan_and_execute` to
     `[place_pose.x, place_pose.y, place_pose.z + 0.15]` —
     same xy, z bumped 15cm. Avoids dragging the gripper across the
-    just-released object on the way to look_forward.
+    just-released object on the way to look_forward. The arm now
+    looks straight down at the drop spot from ~15cm above — use this
+    vantage for the verification step below.
 
-12. **Return to look_forward** — `moveit__plan_and_execute` with
+12. **Verify drop landed in/on the target — visual look-down inspection.**
+    Skip this step in surface mode if `target_container == "floor"`
+    (out of scope). Otherwise run this for both container and surface
+    modes; it is the gate on success.
+
+    a. Get the arm camera image (you are already looking down at the
+       drop spot from step 11): `perception__look` with `camera="arm"`.
+       The image is returned to you directly; reason on the pixels.
+
+    b. Visually decide: is the `<object_name>` you were holding now
+       inside (container mode) / on (surface mode) the
+       `<target_container>`?
+       - Look for the object's shape and color (e.g., a white cube) at
+         the location where you released it.
+       - For containers (bin/basket): the object should be visible
+         INSIDE the container's opening, surrounded by the container's
+         walls or the rim. If it sits next to or in front of the
+         container on the floor, that is a failure.
+       - For surfaces (table): the object should be visible centered
+         within the surface footprint. If it has rolled off the edge
+         or is partially over an edge, that is a failure.
+       - Be conservative — if the image is ambiguous, dark, or you
+         cannot identify the object at all, treat as failure.
+
+    c. Decide:
+       - On pass: continue to step 13, then call
+         `report_place_result` with `success=true`, `error_code="NONE"`,
+         and a reason that names what you saw ("white cube visible
+         inside the brown trash bin at the expected location").
+       - On fail: continue to step 13 (retract first), then call
+         `report_place_result` with `success=false`,
+         `error_code="PLACE_DROP_VERIFY_FAILED"`, and a reason that
+         describes what you actually saw ("white cube visible on the
+         floor 10cm in front of the bin opening — landed past the
+         far rim").
+
+    Rationale: SAM3 + geometric xy comparison was tried earlier and
+    proved unreliable when the object is small and inside a dark
+    container (segmentation either misses it or returns a wrong
+    centroid). A direct visual judgement on the arm-cam frame from
+    above is more robust for in-container / on-surface verification.
+
+13. **Return to look_forward** — `moveit__plan_and_execute` with
     `group="arm"`, `target_type="joint_state"`,
     `target={"joint_positions":[-0.0001, -0.2429, -2.8291, -0.7983, 1.5622, 0.0]}`.
     If joint_state fails, fallback to `target_type="named_state"`,
@@ -334,10 +378,19 @@ lower band. Both visible.
   `[-0.0001, -0.2429, -2.8291, -0.7983, 1.5622, 0.0]` if named state
   fails), then retry from step 3.
 - DO NOT hardcode drop coordinates. Always use the perception output.
-- Report FAILURE honestly. A ground-truth post-step will attempt to
-  re-segment the held object on the front camera after you report
-  SUCCESS; if it is still visible there, your SUCCESS will be
-  overridden to FAILURE.
+- Step 12 (visual look-down inspection from the lift-clear pose) is
+  the PRIMARY success gate. It uses `perception__look(camera="arm")`
+  to get the arm-cam image, and you decide visually whether the
+  released object is inside/on the target. No SAM3 segmentation or
+  geometric xy compare for verification — direct image reasoning is
+  more robust for small objects in dark containers.
+- A second-line runtime post-step ALSO runs after `report_place_result`:
+  it re-segments the held object on the FRONT camera and overrides
+  `success=true` to `success=false, error_code="PLACE_DROP_VERIFY_FAILED"`
+  if the object is still visible there. This catches cases where the
+  object bounced clear of the drop area and ended up visible on the
+  body-mounted camera. Treat it as belt-and-suspenders; step 12 is
+  what you control directly.
 - If `plan_and_execute` to the final drop pose fails and you cannot
   recover, report FAILURE rather than releasing at a fallback pose —
   dropping the object in the wrong place is worse than not dropping
@@ -345,6 +398,18 @@ lower band. Both visible.
 
 ## Reporting
 
-When done, respond with EXACTLY one of:
-- `"SUCCESS: <brief description of what was placed where>"`
-- `"FAILURE: <brief description of what went wrong>"`
+When done, **call `report_place_result(success=..., error_code=..., reason=...)`** as your final tool call. The args you pass ARE the subagent's return value to the orchestrator. Do NOT emit free-text "SUCCESS:" or "FAILURE:" lines anymore — the runtime no longer parses them.
+
+Args:
+- `success` (bool): `true` only if the held object was released at the intended drop pose and the arm retracted to look_forward. A ground-truth post-step verifier (front-camera SAM3 for the held object) may still override this to `false` if the object is still visible after release.
+- `error_code` (enum):
+  - `NONE` — use on success.
+  - `PLACE_OUT_OF_SCOPE` — target_container is unsupported (e.g. "floor" before dynamic object-height plumbing is added).
+  - `PLACE_SEG_MISSED` — SAM3 could not find the target container on the front camera after the prompt + fallback chain. Navigator did not deliver the robot to a viable standoff.
+  - `PLACE_REACH_EXCEEDED` — computed drop pose `dist > 0.70m` from base, past UR5 place envelope. Navigator must redeliver.
+  - `PLACE_PLAN_FAILED` — MoveIt plan failed at pre-place / descent / release / retract even after `clear_planning_scene` recovery.
+  - `PLACE_HOLDING_NOTHING` — pre-check showed the gripper was not holding anything; nothing to release.
+  - `PLACE_DROP_VERIFY_FAILED` — the runtime's post-release verifier rejected the agent's `success=true` because the object is still visible on the front camera. Usually set automatically by the runtime, not by the agent.
+- `reason` (str): one or two sentences. Mention the segmented container's centroid xy if relevant.
+
+Anywhere this skill text says "report SUCCESS" or "report FAILURE", it means **call `report_place_result`** with the appropriate `success` and `error_code`.

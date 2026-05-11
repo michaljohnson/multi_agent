@@ -58,18 +58,22 @@ async def test_pick(object_name: str):
         print(json.dumps(result, indent=2))
 
 
-async def test_place(target_container: str):
+async def test_place(target_container: str, target_object: str | None = None):
     """Test place executor on a single target (no orchestrator/navigator).
 
     Assumes the robot is already holding an object and positioned near
     the drop target.
     """
-    print(f"\n=== Testing place executor: target='{target_container}' ===\n")
+    print(f"\n=== Testing place executor: target='{target_container}' ===")
+    if target_object:
+        print(f"    Held object: '{target_object}'")
+    print()
 
     async with MCPClient() as mcp:
         result = await execute_place(
             mcp=mcp,
             target_container=target_container,
+            object_name=target_object,
             model=EXECUTOR_MODEL,
         )
         print(f"\n=== Place Result ===")
@@ -206,7 +210,7 @@ def main():
     if args.test_pick:
         asyncio.run(test_pick(args.test_pick))
     elif args.test_place:
-        asyncio.run(test_place(args.test_place))
+        asyncio.run(test_place(args.test_place, args.target_object))
     elif args.test_navigator:
         dest = " ".join(args.test_navigator)
         asyncio.run(test_navigator(dest, args.target_object))
