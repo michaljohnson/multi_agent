@@ -1,6 +1,5 @@
 import json
 import logging
-import re
 
 from multi_agent.clients.llm import (
     call_llm, wants_tool_use, is_done, get_tool_calls,
@@ -23,6 +22,55 @@ PICK_TOOLS = {
     "ros__send_action_goal",
     "ros__subscribe_once",
 }
+
+# Virtual termination tool. The agent calls this as its last action; the
+# runtime intercepts the call (it is NOT dispatched to MCP) and returns its
+# args as the subagent's result. Replaces regex-scraping of free-text
+# "SUCCESS:" / "FAILURE:" sentinels: the agent's structured intent lives in
+# tool-call args, not in prose.
+REPORT_PICK_RESULT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "report_pick_result",
+        "description": (
+            "Finish the pick. The args you pass ARE the subagent's return "
+            "value to the orchestrator. Call this exactly once as your "
+            "final action. Do NOT emit free-text SUCCESS:/FAILURE: lines."
+        ),
+        "parameters": {
+            "type": "object",
+            "required": ["success", "error_code", "reason"],
+            "properties": {
+                "success": {
+                    "type": "boolean",
+                    "description": (
+                        "True only if /gripper/status reported "
+                        "'attached:<target>', the object was lifted, and "
+                        "the arm is back at look_forward."
+                    ),
+                },
+                "error_code": {
+                    "type": "string",
+                    "enum": [
+                        "NONE",
+                        "PICK_SEG_MISSED",
+                        "PICK_REACH_EXCEEDED",
+                        "PICK_PLAN_FAILED",
+                        "PICK_ATTACH_TIMEOUT",
+                        "PICK_WRONG_OBJECT",
+                        "PICK_HOLDING_ALREADY",
+                    ],
+                    "description": "Use NONE on success; otherwise pick the most specific failure code.",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "One or two sentences justifying the result.",
+                },
+            },
+        },
+    },
+}
+
 
 def _filter_tools(all_tools: list[dict]) -> list[dict]:
     return [t for t in all_tools if t["function"]["name"] in PICK_TOOLS]
@@ -60,10 +108,10 @@ async def execute_pick(
         max_tool_calls: Safety cap on tool calls to prevent runaway.
 
     Returns:
-        {"success": bool, "reason": str, "tool_calls_used": int}
+        {"success": bool, "error_code": str, "reason": str, "tool_calls_used": int}
     """
     all_tools = mcp.get_tools()
-    tools = _filter_tools(all_tools)
+    tools = _filter_tools(all_tools) + [REPORT_PICK_RESULT_TOOL]
 
     system_prompt = _SKILL_FILE.read_text()
     user_message = f"Pick up the object '{object_name}'."
@@ -80,6 +128,23 @@ async def execute_pick(
         response = call_llm(messages=messages, tools=tools, model=model)
 
         if wants_tool_use(response):
+            # If report_pick_result appears in this batch, terminate
+            # immediately with its args; any other tool calls in the same
+            # batch are discarded — the subagent's intent is to finish.
+            for tc_id, tc_name, tc_args in get_tool_calls(response):
+                if tc_name == "report_pick_result":
+                    tool_call_count += 1
+                    logger.info(
+                        f"  [{tool_call_count}] report_pick_result"
+                        f"({json.dumps(tc_args)[:200]})"
+                    )
+                    return {
+                        "success": bool(tc_args.get("success", False)),
+                        "error_code": tc_args.get("error_code", "NONE"),
+                        "reason": tc_args.get("reason", ""),
+                        "tool_calls_used": tool_call_count,
+                    }
+
             messages.append(assistant_message(response))
 
             tool_results = []
@@ -104,17 +169,17 @@ async def execute_pick(
 
         elif is_done(response):
             final_text = get_text_content(response)
-            logger.info(f"Pick finished:\n{final_text}")
-
-            # Find last standalone SUCCESS/FAILURE; whichever appears later wins
-            s_matches = list(re.finditer(r'\bSUCCESS\b', final_text, re.IGNORECASE))
-            f_matches = list(re.finditer(r'\bFAILURE\b', final_text, re.IGNORECASE))
-            last_s = s_matches[-1].start() if s_matches else -1
-            last_f = f_matches[-1].start() if f_matches else -1
-            success = last_s > last_f
+            logger.warning(
+                f"Pick exited without calling report_pick_result. "
+                f"Treating as failure. Last text: {final_text[:500]}"
+            )
             return {
-                "success": success,
-                "reason": final_text,
+                "success": False,
+                "error_code": "NONE",
+                "reason": (
+                    "Subagent exited without calling report_pick_result. "
+                    f"Last text: {final_text}"
+                ),
                 "tool_calls_used": tool_call_count,
             }
         else:
@@ -122,6 +187,7 @@ async def execute_pick(
             logger.warning(f"Unexpected finish_reason: {stop}")
             return {
                 "success": False,
+                "error_code": "NONE",
                 "reason": f"Unexpected stop: {stop}",
                 "tool_calls_used": tool_call_count,
             }
@@ -129,6 +195,7 @@ async def execute_pick(
     logger.warning(f"Pick hit max tool calls ({max_tool_calls})")
     return {
         "success": False,
+        "error_code": "NONE",
         "reason": f"Exceeded maximum tool calls ({max_tool_calls})",
         "tool_calls_used": tool_call_count,
     }

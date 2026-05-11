@@ -237,6 +237,18 @@ close, lift, return). Higher surfaces are out of scope.
 
 ## Reporting
 
-When done, respond with EXACTLY one of:
-- `"SUCCESS: <brief description of what was done>"`
-- `"FAILURE: <brief description of what went wrong>"`
+When done, **call `report_pick_result(success=..., error_code=..., reason=...)`** as your final tool call. The args you pass ARE the subagent's return value to the orchestrator. Do NOT emit free-text "SUCCESS:" or "FAILURE:" lines anymore — the runtime no longer parses them.
+
+Args:
+- `success` (bool): `true` only if step 10 verified `/gripper/status == attached:<target>` AND the object was lifted AND the arm is back at look_forward. A false success is worse than a failure.
+- `error_code` (enum):
+  - `NONE` — use on success.
+  - `PICK_SEG_MISSED` — SAM3 could not find the object on either camera.
+  - `PICK_REACH_EXCEEDED` — grasp pose x > 1.10m, past UR5 envelope. Navigator must redeliver.
+  - `PICK_PLAN_FAILED` — MoveIt plan failed at pre-grasp / descent / lift even after `clear_planning_scene` recovery.
+  - `PICK_ATTACH_TIMEOUT` — gripper closed but `/gripper/status` never reported attached within 8s + 5s retry.
+  - `PICK_WRONG_OBJECT` — `/gripper/status` reported attached but the model name does not token-overlap with the target.
+  - `PICK_HOLDING_ALREADY` — step 0 pre-check showed the gripper was already holding something.
+- `reason` (str): one or two sentences. Mention specific tool-call IDs or grasp coordinates if relevant.
+
+Anywhere this skill text says "report SUCCESS" or "report FAILURE", it means **call `report_pick_result`** with the appropriate `success` and `error_code`.
