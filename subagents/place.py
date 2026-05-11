@@ -98,7 +98,7 @@ async def execute_place(
     """Run a place agent to drop the held object into / onto a target.
 
     The robot must already be positioned within UR5 reach of the target
-    container/surface. Navigator owns ALL positioning (including the
+    container/surface. The approach agent owns ALL positioning (including the
     fine-approach to ~0.85m standoff). Place is a pure manipulation
     primitive: segment, compute drop pose, lower, release, retract,
     visually verify the drop via arm-cam look-down (step 12). If the

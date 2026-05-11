@@ -4,7 +4,7 @@
 Usage:
     python3 -m multi_agent.main --task "pick up the white cube in the kids room and place it into the trash bin in the kids room"
     python3 -m multi_agent.main --test-pick "white cube"        
-    python3 -m multi_agent.main --test-navigator "kitchen" --object-name "red coke can"
+    python3 -m multi_agent.main --test-approach "kitchen" --object-name "red coke can"
     python3 -m multi_agent.main --test-place "trashbin"  
 """
 
@@ -32,17 +32,17 @@ from multi_agent.orchestrator import run_orchestrator
 #   LLM_MODEL=ollama/llama3                         # local Ollama
 #   LLM_MODEL=anthropic/claude-sonnet-4-20250514    # Anthropic
 #   LLM_MODEL=openai/qwen3-vl-...                   # any OpenAI-compatible
-# Per-role overrides: ORCHESTRATOR_MODEL, EXECUTOR_MODEL, NAVIGATOR_MODEL.
+# Per-role overrides: ORCHESTRATOR_MODEL, EXECUTOR_MODEL, APPROACH_MODEL.
 # Whatever provider is selected, ensure its native API key env var is
 # exported (e.g. ANTHROPIC_API_KEY, OPENAI_API_KEY) — LiteLLM picks them
 # up automatically.
 LLM_MODEL = os.environ.get("LLM_MODEL", "anthropic/claude-sonnet-4-20250514")
 ORCHESTRATOR_MODEL = os.environ.get("ORCHESTRATOR_MODEL", LLM_MODEL)
 EXECUTOR_MODEL = os.environ.get("EXECUTOR_MODEL", LLM_MODEL)
-NAVIGATOR_MODEL = os.environ.get("NAVIGATOR_MODEL", LLM_MODEL)
+APPROACH_MODEL = os.environ.get("APPROACH_MODEL", LLM_MODEL)
 
 async def test_pick(object_name: str):
-    """Test pick executor on a single object (no orchestrator/navigator).
+    """Test pick executor on a single object (no orchestrator/approach).
 
     Assumes the robot is already positioned in front of the target object.
     """
@@ -59,7 +59,7 @@ async def test_pick(object_name: str):
 
 
 async def test_place(target_location: str, object_name: str):
-    """Test place executor on a single target (no orchestrator/navigator).
+    """Test place executor on a single target (no orchestrator/approach).
 
     Assumes the robot is already holding an object and positioned near
     the drop target.
@@ -79,26 +79,26 @@ async def test_place(target_location: str, object_name: str):
         print(json.dumps(result, indent=2))
 
 
-async def test_navigator(
+async def test_approach(
     target_area: str,
     object_name: str,
     mode: str,
 ):
-    """Test the navigator with a natural language target area (no orchestrator)."""
-    from multi_agent.subagents.navigator import execute_navigate
+    """Test the approach agent with a natural language target area (no orchestrator)."""
+    from multi_agent.subagents.approach import execute_approach
 
-    print(f"\n=== Testing navigator: '{target_area}' ===")
+    print(f"\n=== Testing approach: '{target_area}' ===")
     print(f"    Target object: '{object_name}'")
     print(f"    Mode: '{mode}'")
     print()
 
     async with MCPClient() as mcp:
-        result = await execute_navigate(
+        result = await execute_approach(
             mcp=mcp,
             target_area=target_area,
             object_name=object_name,
             mode=mode,
-            model=NAVIGATOR_MODEL,
+            model=APPROACH_MODEL,
         )
         print(f"\n=== Result ===")
         print(json.dumps(result, indent=2))
@@ -108,7 +108,7 @@ async def run_full(task: str):
     """Run the full orchestrator with an open-ended task."""
     print(f"\n=== Task: {task} ===")
     print(f"Orchestrator: {ORCHESTRATOR_MODEL}")
-    print(f"Navigator:    {NAVIGATOR_MODEL}")
+    print(f"Approach:     {APPROACH_MODEL}")
     print(f"Executor:     {EXECUTOR_MODEL}\n")
 
     async with MCPClient() as mcp:
@@ -117,7 +117,7 @@ async def run_full(task: str):
             task=task,
             orchestrator_model=ORCHESTRATOR_MODEL,
             executor_model=EXECUTOR_MODEL,
-            navigator_model=NAVIGATOR_MODEL,
+            approach_model=APPROACH_MODEL,
         )
         print(f"\n=== Final Report ===")
         print(result["summary"])
@@ -137,28 +137,28 @@ def main():
         type=str,
         metavar="OBJECT",
         default=None,
-        help="Test single pick of OBJECT (no orchestrator/navigator)",
+        help="Test single pick of OBJECT (no orchestrator/approach)",
     )
     parser.add_argument(
         "--test-place",
         type=str,
         metavar="CONTAINER",
         default=None,
-        help="Test single place into CONTAINER (no orchestrator/navigator). Robot must already be holding an object.",
+        help="Test single place into CONTAINER (no orchestrator/approach). Robot must already be holding an object.",
     )
     parser.add_argument(
-        "--test-navigator",
+        "--test-approach",
         type=str,
         nargs="+",
         metavar="DEST",
         default=None,
-        help="Test navigation to DEST, optionally with --object-name (e.g. --test-navigator the kitchen area)",
+        help="Test navigation to DEST, optionally with --object-name (e.g. --test-approach the kitchen area)",
     )
     parser.add_argument(
         "--object-name",
         type=str,
         default=None,
-        help="Target object context for navigator (e.g. 'red coke can on the floor')",
+        help="Target object context for approach agent (e.g. 'red coke can on the floor')",
     )
     parser.add_argument(
         "--mode",
@@ -166,7 +166,7 @@ def main():
         choices=["pick", "surface_place", "container_place", "floor_place"],
         default=None,
         help=(
-            "Required for --test-navigator. What the next subagent call "
+            "Required for --test-approach. What the next subagent call "
             "will be — determines the approach standoff. 'pick' / "
             "'floor_place' = 0.85m, 'container_place' = 0.65m, "
             "'surface_place' = 0.45m."
@@ -193,7 +193,7 @@ def main():
         class _AgentTagFormatter(logging.Formatter):
             _TAGS = {
                 "multi_agent.orchestrator":         "[ORCHESTRATOR]",
-                "multi_agent.subagents.navigator": "[NAVIGATOR]   ",
+                "multi_agent.subagents.approach":  "[APPROACH]    ",
                 "multi_agent.subagents.pick":      "[PICK]        ",
                 "multi_agent.subagents.place":     "[PLACE]       ",
                 "multi_agent.clients.mcp":         "[MCP]         ",
@@ -230,29 +230,29 @@ def main():
                 "object landed in/on the target)"
             )
         asyncio.run(test_place(args.test_place, args.object_name))
-    elif args.test_navigator:
-        area = " ".join(args.test_navigator)
+    elif args.test_approach:
+        area = " ".join(args.test_approach)
         if not args.object_name:
             parser.error(
-                "--test-navigator requires --object-name (the navigator's "
+                "--test-approach requires --object-name (the approach agent's "
                 "job is to put the target in view; without one it has nothing "
                 "to verify)"
             )
         if not args.mode:
             parser.error(
-                "--test-navigator requires --mode (picks the approach "
+                "--test-approach requires --mode (picks the approach "
                 "standoff: 'pick' / 'floor_place' = 0.85m, "
                 "'container_place' = 0.65m, 'surface_place' = 0.45m). "
                 "The silent default to 'pick' previously broke downstream "
                 "places that needed a closer standoff."
             )
-        asyncio.run(test_navigator(area, args.object_name, args.mode))
+        asyncio.run(test_approach(area, args.object_name, args.mode))
     elif args.task:
         asyncio.run(run_full(args.task))
     else:
         parser.error(
             "no action specified — pass --task, --test-pick, --test-place, "
-            "or --test-navigator"
+            "or --test-approach"
         )
 
 

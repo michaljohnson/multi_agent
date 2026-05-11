@@ -8,7 +8,7 @@ from multi_agent.clients.llm import (
 from multi_agent.clients.mcp import MCPClient
 from multi_agent.subagents.pick import execute_pick
 from multi_agent.subagents.place import execute_place
-from multi_agent.subagents.navigator import execute_navigate
+from multi_agent.subagents.approach import execute_approach
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -21,16 +21,17 @@ ORCHESTRATOR_TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "navigate",
+            "name": "approach",
             "description": (
-                "Navigate the robot to a destination. Spawns a navigator agent "
-                "that uses its own environment knowledge to drive there, "
-                "verifies the area by camera, and closes to a mode-dependent "
-                "standoff from the object_name so the next step (pick or "
-                "place) starts within reach. The `mode` argument selects the "
-                "standoff: 0.85m for pick / floor_place, 0.65m for "
-                "container_place, 0.45m for surface_place (UR5 needs to be "
-                "close for top-down release at table height)."
+                "Find a named object in a target area and approach it. "
+                "Spawns an approach agent that drives to the area, visually "
+                "verifies arrival, finds the object (spin-searching if "
+                "needed), and closes to a mode-dependent standoff so the "
+                "next step (pick or place) starts within arm-reach. The "
+                "`mode` argument selects the standoff: 0.85m for pick / "
+                "floor_place, 0.65m for container_place, 0.45m for "
+                "surface_place (UR5 needs to be close for top-down release "
+                "at table height)."
             ),
             "parameters": {
                 "type": "object",
@@ -46,13 +47,13 @@ ORCHESTRATOR_TOOLS = [
                     "object_name": {
                         "type": "string",
                         "description": (
-                            "Required. The visible landmark the navigator "
-                            "must put in view (SAM3-verified) and close to "
-                            "the standoff. Before a floor pickup: pass the "
+                            "Required. The visible landmark the approach "
+                            "agent must put in view (SAM3-verified) and close "
+                            "to the standoff. Before a floor pickup: pass the "
                             "object itself (e.g. 'red ball'). Before a place: "
                             "pass the container or surface name (e.g. "
                             "'trash bin', 'wooden coffee table'). "
-                            "(Surface pickups do NOT call navigate at all — "
+                            "(Surface pickups do NOT call approach at all — "
                             "the user pre-positions the robot next to the "
                             "surface.)"
                         ),
@@ -66,7 +67,7 @@ ORCHESTRATOR_TOOLS = [
                             "floor_place",
                         ],
                         "description": (
-                            "What the next agent will do after this navigate "
+                            "What the next agent will do after this approach "
                             "completes. Determines approach standoff: "
                             "'pick' / 'floor_place' = 0.85m, "
                             "'container_place' = 0.65m (drop-into bin), "
@@ -88,7 +89,7 @@ ORCHESTRATOR_TOOLS = [
             "name": "pick",
             "description": (
                 "Pick up an object near the robot. The robot must already be "
-                "positioned close enough to reach it (call navigate first). "
+                "positioned close enough to reach it (call approach first). "
                 "Spawns a pick-and-place agent that handles perception, grasp "
                 "planning, and manipulation."
             ),
@@ -111,7 +112,7 @@ ORCHESTRATOR_TOOLS = [
             "description": (
                 "Place the currently held object onto / into a target "
                 "container or surface. The robot must already be near the "
-                "target (call navigate first). Spawns a place agent that "
+                "target (call approach first). Spawns a place agent that "
                 "segments the target on the front camera, computes its "
                 "centroid, releases the object above it, retracts, and "
                 "verifies the drop via an arm-cam look-down vision check "
@@ -156,20 +157,20 @@ async def _handle_tool_call(
     tool_name: str,
     tool_input: dict,
     executor_model: str,
-    navigator_model: str,
+    approach_model: str,
 ):
     """Handle a tool call from the orchestrator.
 
-    For sub-agent tools (navigate / pick / place) returns a JSON string.
+    For sub-agent tools (approach / pick / place) returns a JSON string.
     For raw MCP tools (look, etc.) returns the raw content blocks.
     """
-    if tool_name == "navigate":
-        result = await execute_navigate(
+    if tool_name == "approach":
+        result = await execute_approach(
             mcp=mcp,
             target_area=tool_input["target_area"],
             object_name=tool_input["object_name"],
             mode=tool_input["mode"],
-            model=navigator_model,
+            model=approach_model,
         )
         return json.dumps(result)
 
@@ -200,7 +201,7 @@ async def run_orchestrator(
     task: str,
     orchestrator_model: str = None,
     executor_model: str = None,
-    navigator_model: str = None,
+    approach_model: str = None,
     max_turns: int = 50,
 ) -> dict:
     """Run the orchestrator agent with an open-ended task.
@@ -211,7 +212,7 @@ async def run_orchestrator(
               from the coffee table and put it on the kitchen table").
         orchestrator_model: LiteLLM model string.
         executor_model: LiteLLM model string for pick-and-place agents.
-        navigator_model: LiteLLM model string for navigator agents.
+        approach_model: LiteLLM model string for the approach agent.
         max_turns: Safety cap on orchestrator turns.
 
     Returns:
@@ -253,7 +254,7 @@ async def run_orchestrator(
 
                 result = await _handle_tool_call(
                     mcp, tc_name, tc_args,
-                    executor_model, navigator_model,
+                    executor_model, approach_model,
                 )
                 tool_results.append(tool_result_message(tc_id, result))
 

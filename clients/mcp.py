@@ -232,7 +232,7 @@ class MCPClient:
 
         Returns all tools across all connected servers, prefixed with the
         server short name (e.g. 'perception__look'). Caller-side filtering
-        is done with per-agent allowlists (e.g. NAVIGATOR_TOOLS).
+        is done with per-agent allowlists (e.g. APPROACH_TOOLS).
         """
         tools = []
         for server_name, server_tools in self._tools.items():

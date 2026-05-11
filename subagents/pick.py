@@ -96,7 +96,7 @@ async def execute_pick(
     """Run a pick agent to grasp an object.
 
     The robot must already be positioned within UR5 reach of the object.
-    Navigator owns ALL positioning (including the fine-approach to ~0.85m
+    The approach agent owns ALL positioning (including the fine-approach to ~0.85m
     standoff). Pick is a pure manipulation primitive: segment, grasp,
     verify, lift. If the segmented grasp pose is out of reach, pick
     reports FAILURE — it does not drive the base.

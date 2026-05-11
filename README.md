@@ -35,12 +35,12 @@ The MCP servers are not part of this package; you bring your own. The architectu
 
 ```
 multi_agent/
-  main.py                  CLI entry (--task / --test-{pick,place,navigator})
-  orchestrator.py          top-level brain — decomposes task into navigate/pick/place sub-agent calls
+  main.py                  CLI entry (--task / --test-{pick,place,approach})
+  orchestrator.py          top-level brain — decomposes task into approach/pick/place sub-agent calls
   orchestrator.md          orchestrator system prompt (loaded by orchestrator.py)
   subagents/               LLM-driven sub-agents, each with its own MCP tool subset and prompt
     __init__.py
-    navigator.py / .md     drives base + verifies arrival via SAM3 + spin-search recovery
+    approach.py / .md      drives base + finds target via LLM-vision + spin-search + drives to standoff
     pick.py / .md          arm-cam segment → grasp pose → pre-grasp → descend → close → verify
     place.py / .md         front-cam segment → drop pose → pre-place → descend → release → verify
   clients/                 external system adapters
@@ -62,7 +62,7 @@ cp multi_agent/.env.example multi_agent/.env
 # Single-skill smoke tests (assume robot is pre-positioned for pick/place):
 python3 -m multi_agent.main --test-pick "red coke can"
 python3 -m multi_agent.main --test-place "trash bin"
-python3 -m multi_agent.main --test-navigator "kitchen" --target-object "wooden coffee table"
+python3 -m multi_agent.main --test-approach "kitchen" --object-name "wooden coffee table" --mode pick
 
 # Full orchestrator (long-horizon task):
 python3 -m multi_agent.main --task "pick up the red coke can in the kitchen and place it on the wooden coffee table in the living room"
@@ -74,8 +74,8 @@ python3 -m multi_agent.main --task "pick up the red coke can in the kitchen and 
 
 ## How a turn works
 
-1. Orchestrator LLM receives the user task and three sub-agent tool schemas (`navigate`, `pick`, `place`) plus `look()` for visual ground-truth checks.
-2. Orchestrator emits a sub-agent call (e.g. `navigate(target_area="kitchen", object_name="red coke can")`).
+1. Orchestrator LLM receives the user task and three sub-agent tool schemas (`approach`, `pick`, `place`) plus `look()` for visual ground-truth checks.
+2. Orchestrator emits a sub-agent call (e.g. `approach(target_area="kitchen", object_name="red coke can", mode="pick")`).
 3. The matching sub-agent in `subagents/` is invoked — it loads its own `.md` system prompt, sees its own narrow MCP tool subset (3-7 tools), and runs its own LLM loop.
 4. The sub-agent returns a structured result `{success: bool, reason: str, tool_calls_used: int, ...}` to the orchestrator.
 5. The orchestrator reads the result, optionally calls `look()` for visual confirmation, decides the next sub-agent or returns a final report.
@@ -86,7 +86,7 @@ Each sub-agent has its own LLM context — the orchestrator does NOT see the sub
 
 The skills assume specific MCP tool names (e.g. `perception__segment_objects`, `nav2__approach_target`, `moveit__plan_and_execute`). If your MCP servers expose different names, edit the `*_TOOLS` whitelist sets at the top of each `subagents/*.py` and the calls inside. The architectural pattern (orchestrator → sub-agent → MCP tool) is independent of the specific tool names.
 
-The hardcoded entry-pose table in `subagents/navigator.md` is keyed to a particular simulated home environment. Replace with your own room/area coordinates.
+The hardcoded entry-pose table in `subagents/approach.md` is keyed to a particular simulated home environment. Replace with your own room/area coordinates.
 
 ## Design decisions
 

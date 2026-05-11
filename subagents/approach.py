@@ -13,9 +13,9 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-_SKILL_FILE = Path(__file__).parent / "navigator.md"
+_SKILL_FILE = Path(__file__).parent / "approach.md"
 
-NAVIGATOR_TOOLS = {
+APPROACH_TOOLS = {
     "moveit__plan_and_execute",
     "nav2__navigate_to_pose",
     "nav2__clear_costmaps",
@@ -29,10 +29,10 @@ NAVIGATOR_TOOLS = {
 # "SUCCESS:" / "FAILURE:" sentinels and the separate Check 1 / Check 2
 # PASS/FAIL extractor: both pieces of state are now structured tool-call
 # args (success bool + checks[] array), not prose to be parsed.
-REPORT_NAVIGATION_RESULT_TOOL = {
+REPORT_APPROACH_RESULT_TOOL = {
     "type": "function",
     "function": {
-        "name": "report_navigation_result",
+        "name": "report_approach_result",
         "description": (
             "Finish the navigation. The args you pass ARE the subagent's "
             "return value to the orchestrator. Call this exactly once as "
@@ -90,8 +90,8 @@ REPORT_NAVIGATION_RESULT_TOOL = {
 
 
 def _filter_tools(all_tools: list[dict]) -> list[dict]:
-    """Filter to only the tools the navigator needs."""
-    return [t for t in all_tools if t["function"]["name"] in NAVIGATOR_TOOLS]
+    """Filter to only the tools the approach agent needs."""
+    return [t for t in all_tools if t["function"]["name"] in APPROACH_TOOLS]
 
 
 def _check_result(checks: list[dict], name: str) -> str:
@@ -127,7 +127,7 @@ def _parse_robot_pose(raw) -> tuple[float | None, float | None, float | None]:
 #     distance leaves comfortable headroom for grasp pose math.
 #   - surface_place: wrist must be HIGH (surface_z + 0.31m for can on
 #     coffee table = 0.66m). UR5 top-down reach at z=0.66m caps at
-#     x≈0.55m, so navigator needs to deliver closer (~0.45m).
+#     x≈0.55m, so approach agent needs to deliver closer (~0.45m).
 #   - container_place: drop INTO the bin from above; wrist sits 35cm
 #     above rim. Same UR5 high-z constraints apply but the rim is
 #     usually at moderate height, so 0.65m gives margin.
@@ -313,10 +313,10 @@ async def _verify_target_visible(
     mcp: MCPClient, object_name: str
 ) -> tuple[bool, str, int]:
     """Segmentation gate: object_name MUST be segmented on at least one
-    camera (arm preferred, front acceptable) before navigator success is
+    camera (arm preferred, front acceptable) before approach agent success is
     accepted.
 
-    Architectural contract: the navigator only guarantees that the target
+    Architectural contract: the approach agent only guarantees that the target
     is visible to the front camera at handoff. The pick/place agent owns
     the fine-approach step (creep) and re-segments on the arm camera once
     close. So a front-cam SUCCESS is sufficient — the pick agent will
@@ -328,7 +328,7 @@ async def _verify_target_visible(
     Flow:
       1. SAM3 on arm camera; on SUCCESS → accept (best handoff state).
       2. SAM3 on front camera; on SUCCESS → accept (good handoff state —
-         navigator will approach next).
+         approach agent will approach next).
       3. If both miss, spin-search up to ``_VERIFY_SPIN_STEPS`` times.
          Each spin: re-check arm cam first, then front cam. Accept the
          first SUCCESS.
@@ -361,9 +361,9 @@ async def _verify_target_visible(
     if await _seg("arm") == "SUCCESS":
         return True, "verified on arm camera", tool_calls
 
-    # 2: front cam (acceptable — navigator will approach)
+    # 2: front cam (acceptable — approach agent will approach)
     if await _seg("front") == "SUCCESS":
-        return True, "verified on front camera (navigator will approach)", tool_calls
+        return True, "verified on front camera (approach agent will approach)", tool_calls
 
     # 3: spin-and-search — robot likely landed off-axis from nav2
     _VERIFY_SPIN_STEPS = 6
@@ -394,7 +394,7 @@ async def _verify_target_visible(
         if await _seg("front") == "SUCCESS":
             return (
                 True,
-                f"verified on front camera after {i+1} spin(s) (navigator will approach)",
+                f"verified on front camera after {i+1} spin(s) (approach agent will approach)",
                 tool_calls,
             )
 
@@ -407,12 +407,12 @@ async def _try_spin_search(
     result: dict,
     standoff_m: float = 0.85,
 ) -> dict:
-    """Post-process navigator result.
+    """Post-process approach agent result.
 
-    Architectural contract: the navigator is responsible for landing the
+    Architectural contract: the approach agent is responsible for landing the
     robot at a known map coordinate AND ensuring the target is visible
     (front camera minimum, arm camera ideal) at handoff. The drive-closer
-    step is also owned by the navigator (see ``_approach_target``);
+    step is also owned by the approach agent (see ``_approach_target``);
     pick/place are pure manipulation primitives once handoff completes.
 
     So the post-process is small:
@@ -423,7 +423,7 @@ async def _try_spin_search(
         orchestrator will replan navigation.
 
     The verify gate (``_final_verify_gate`` → ``_verify_target_visible``)
-    accepts SAM3 SUCCESS on either camera; navigator approaches on arm
+    accepts SAM3 SUCCESS on either camera; approach agent approaches on arm
     cam from there.
     """
     if result["success"]:
@@ -495,7 +495,7 @@ async def _final_verify_gate(
     result: dict,
     standoff_m: float = 0.85,
 ) -> dict:
-    """Hard gate: a navigator result with success=True is only accepted if
+    """Hard gate: a approach agent result with success=True is only accepted if
     SAM3 can still segment the target on front or arm camera *right now*.
 
     Pick / place will use the arm camera, so this is the ground-truth
@@ -534,7 +534,7 @@ async def _final_verify_gate(
             )
         return result
     logger.warning(
-        f"  [verify] OVERRIDE: navigator claimed SUCCESS but '{object_name}' "
+        f"  [verify] OVERRIDE: approach agent claimed SUCCESS but '{object_name}' "
         f"is not segmentable — marking FAILURE"
     )
     result["success"] = False
@@ -547,7 +547,7 @@ async def _final_verify_gate(
 
 
 
-async def execute_navigate(
+async def execute_approach(
     mcp: MCPClient,
     target_area: str,
     object_name: str,
@@ -556,21 +556,21 @@ async def execute_navigate(
     model: str = None,
     max_tool_calls: int = 15,
 ) -> dict:
-    """Run a navigator agent to move the robot to a destination area.
+    """Run a approach agent agent to move the robot to a destination area.
 
     Args:
         mcp: Connected MCPClient instance.
         target_area: Natural language description of the destination area
                        (e.g. "kids room", "living room near the coffee table").
-        object_name: Name of the object the navigator must see at the
+        object_name: Name of the object the approach agent must see at the
                        target_area before reporting success. Required —
-                       a navigator with no specific target has nothing
+                       a approach agent with no specific target has nothing
                        to verify against; use a relocate-only tool if
                        pure repositioning without target verification
                        is what you want.
         approach_pose: Optional (x, y, yaw) in the map frame. If provided,
-                       the navigator drives directly to this pose. If not,
-                       the navigator reasons about where to go.
+                       the approach agent drives directly to this pose. If not,
+                       the approach agent reasons about where to go.
         mode: What the next subagent call will be. Determines
               `_approach_target` standoff via _STANDOFF_BY_MODE lookup.
               Required — picking the wrong mode silently delivers the
@@ -587,19 +587,19 @@ async def execute_navigate(
     """
     if not object_name:
         raise ValueError(
-            "execute_navigate requires a non-empty object_name. The "
-            "navigator's job is to put the target in view; without one "
+            "execute_approach requires a non-empty object_name. The "
+            "approach agent's job is to put the target in view; without one "
             "it cannot verify arrival."
         )
 
     standoff_m = _STANDOFF_BY_MODE.get(mode, 0.85)
     if mode not in _STANDOFF_BY_MODE:
         logger.warning(
-            f"Unknown navigator mode '{mode}'; falling back to 0.85m standoff"
+            f"Unknown approach agent mode '{mode}'; falling back to 0.85m standoff"
         )
 
     all_tools = mcp.get_tools()
-    tools = _filter_tools(all_tools) + [REPORT_NAVIGATION_RESULT_TOOL]
+    tools = _filter_tools(all_tools) + [REPORT_APPROACH_RESULT_TOOL]
 
     system_prompt = _SKILL_FILE.read_text()
 
@@ -614,7 +614,7 @@ async def execute_navigate(
         )
         max_tool_calls = 15  # arm tuck + nav + look + recovery headroom
         logger.info(
-            f"Navigator started (with pose hint): ({x}, {y}, {yaw}) "
+            f"Approach started (with pose hint): ({x}, {y}, {yaw}) "
             f"area='{target_area}' target='{object_name}'"
         )
     else:
@@ -622,10 +622,10 @@ async def execute_navigate(
             f"Navigate to: \"{target_area}\"\n"
             f"Target object to find: \"{object_name}\"\n\n"
             "No approach pose provided. Use perception to orient yourself, "
-            "reason about where the target area is, navigate there, and "
+            "reason about where the target area is, drive there, and "
             "verify arrival."
         )
-        logger.info(f"Navigator started (open): area='{target_area}' target='{object_name}'")
+        logger.info(f"Approach started (open): area='{target_area}' target='{object_name}'")
 
     messages = [
         {"role": "system", "content": system_prompt},
@@ -637,14 +637,14 @@ async def execute_navigate(
         response = call_llm(messages=messages, tools=tools, model=model)
 
         if wants_tool_use(response):
-            # If report_navigation_result appears in this batch, terminate
+            # If report_approach_result appears in this batch, terminate
             # immediately with its args; any other tool calls in the same
             # batch are discarded — the subagent's intent is to finish.
             for tc_id, tc_name, tc_args in get_tool_calls(response):
-                if tc_name == "report_navigation_result":
+                if tc_name == "report_approach_result":
                     tool_call_count += 1
                     logger.info(
-                        f"  [nav {tool_call_count}] report_navigation_result"
+                        f"  [{tool_call_count}] report_approach_result"
                         f"({json.dumps(tc_args)[:300]})"
                     )
                     result = {
@@ -664,7 +664,7 @@ async def execute_navigate(
             for tc_id, tc_name, tc_args in get_tool_calls(response):
                 tool_call_count += 1
                 logger.info(
-                    f"  [nav {tool_call_count}] {tc_name}({json.dumps(tc_args)[:200]})"
+                    f"  [{tool_call_count}] {tc_name}({json.dumps(tc_args)[:200]})"
                 )
 
                 try:
@@ -688,14 +688,14 @@ async def execute_navigate(
         elif is_done(response):
             final_text = get_text_content(response)
             logger.warning(
-                f"Navigator exited without calling report_navigation_result. "
+                f"Approach exited without calling report_approach_result. "
                 f"Treating as failure. Last text: {final_text[:500]}"
             )
             result = {
                 "success": False,
                 "error_code": "NONE",
                 "reason": (
-                    "Subagent exited without calling report_navigation_result. "
+                    "Subagent exited without calling report_approach_result. "
                     f"Last text: {final_text}"
                 ),
                 "checks": [],
@@ -715,7 +715,7 @@ async def execute_navigate(
                 "tool_calls_used": tool_call_count,
             }
 
-    logger.warning(f"Navigator hit max tool calls ({max_tool_calls})")
+    logger.warning(f"Approach hit max tool calls ({max_tool_calls})")
     result = {
         "success": False,
         "error_code": "NONE",
