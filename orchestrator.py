@@ -145,11 +145,12 @@ ORCHESTRATOR_TOOLS = [
     },
 ]
 
-# MCP tools the orchestrator is allowed to call directly (alongside its
-# Python-implemented sub-agent tools above).
-ORCHESTRATOR_MCP_TOOLS = {
-    "perception__look",
-}
+# The orchestrator does NOT call MCP tools directly. All MCP coupling
+# lives in the three subagents (approach / pick / place). This keeps the
+# orchestrator a pure policy LLM that reasons about typed subagent
+# results without any perception/motion primitives in its own surface.
+# Matches the skill-based architecture's planner-LLM design and gives a
+# clean primitive-vs-policy boundary for the thesis comparison.
 
 
 async def _handle_tool_call(
@@ -161,8 +162,8 @@ async def _handle_tool_call(
 ):
     """Handle a tool call from the orchestrator.
 
-    For sub-agent tools (approach / pick / place) returns a JSON string.
-    For raw MCP tools (look, etc.) returns the raw content blocks.
+    Only sub-agent tools (approach / pick / place) are accepted; the
+    orchestrator has no direct-MCP surface.
     """
     if tool_name == "approach":
         result = await execute_approach(
@@ -191,9 +192,11 @@ async def _handle_tool_call(
         )
         return json.dumps(result)
 
-    # MCP-routed tools (look, future direct-MCP tools) — go through the
-    # raw call path so image content blocks survive into the LLM message.
-    return await mcp.call_tool_prefixed_raw(tool_name, tool_input)
+    raise ValueError(
+        f"orchestrator received unknown tool call '{tool_name}'. "
+        f"Allowed: approach, pick, place. The orchestrator is "
+        f"MCP-tool-free; all MCP coupling lives in subagents."
+    )
 
 
 async def run_orchestrator(
@@ -219,12 +222,7 @@ async def run_orchestrator(
         {"summary": str, "turns_used": int}
     """
     system_prompt = _SKILL_FILE.read_text()
-    all_mcp_tools = mcp.get_tools()
-    direct_mcp = [
-        t for t in all_mcp_tools
-        if t["function"]["name"] in ORCHESTRATOR_MCP_TOOLS
-    ]
-    all_tools = ORCHESTRATOR_TOOLS + direct_mcp
+    all_tools = ORCHESTRATOR_TOOLS
 
     messages = [
         {"role": "system", "content": system_prompt},

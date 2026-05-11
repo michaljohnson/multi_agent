@@ -53,39 +53,31 @@ task and manage a team of specialist agents to accomplish it.
   front camera, computes the drop pose, and releases the object. The
   robot must already be near the target (call approach first).
 
-## Ground-truth verification — you have eyes
+## Trust the sub-agents' typed results — you have no eyes
 
-Sub-agents report success/failure in natural language, but they can lie
-or be wrong. For high-stakes transitions (after pick, after approach,
-after place) you verify ground truth by **looking at the camera
-yourself** and reasoning on what you see:
+You do NOT have direct access to MCP tools. All perception, motion, and
+verification happens inside the three sub-agents. Each one returns a
+typed `{success, error_code, reason, ...}` result and is responsible
+for its own ground-truth check:
 
-- **`perception__look(camera="front" | "arm" | "both")`** — returns the
-  raw camera image(s). Throughout this skill we shorten the call as
-  `look(...)`, but the actual tool name in your tool list is
-  `perception__look`.
+- **approach** verifies area + target visibility via `look(camera="both")`
+  inside its own loop (step 3) before reporting success.
+- **pick** verifies grasp via `/gripper/status == attached:<X>` + token-overlap
+  match with the target before reporting success.
+- **place** verifies the drop via `look(camera="arm")` from above the
+  drop spot (step 10) before reporting success.
 
-**Which camera to use:**
-- **Use `front` for all three verify moments** (post-pick, post-nav,
-  post-place). The front camera is body-mounted looking forward, and
-  after pick/place the arm returns to `look_forward` pose — so the
-  gripper sits in the upper part of the front camera view, with the
-  floor and any container in front of the robot below it. This is the
-  camera that sees *both* the gripper state AND the scene.
-- **`arm` is almost never the right choice here.** The arm camera is
-  mounted on the wrist pointing the same direction as the gripper
-  fingers — it sees *what the gripper is about to grasp*, not the
-  gripper itself. So it can't answer "is the gripper holding an
-  object?" If you're tempted to use `arm`, you probably want `front`.
+You only reason about the structured result. If a sub-agent reports
+`success=true`, that's grounded in its own verification step — trust it.
+If `success=false`, react to the typed `error_code` per the recovery
+tables below. Do NOT try to second-guess a sub-agent with your own
+verification — you have no camera tools.
 
-You are a multi-modal model — you can see the image directly and reason
-about it. Do NOT describe the image out loud unless it helps your
-decision. Just look, decide (pass / fail), and move on.
-
-Do NOT use `look` during happy-path sub-agent execution — it only makes
-sense at transitions. Do NOT try to do the sub-agents' work with it
-(no object detection, no navigation reasoning — just verification of
-what a sub-agent just claimed).
+This is a deliberate architectural choice: it keeps the orchestrator
+as a pure policy LLM that reasons about typed results, and lets each
+sub-agent own its verification primitive. Matches the skill-based
+architecture's planner design (zero MCP tools in the top-level LLM)
+and gives a clean primitive-vs-policy boundary.
 
 ## Strategy
 
@@ -126,8 +118,8 @@ what a sub-agent just claimed).
    ```
    | # | Object     | Pickup Location      | Place Location         |
    |---|------------|----------------------|------------------------|
-   | 1 | screwdriver| wooden coffee table  | trash bin (kitchen)    |
-   | 2 | red ball   | hallway floor        | trash bin (kitchen)    |
+   | 1 | white cube | kids room            | trash bin (kits room)  |
+   | 2 | shoe.      | bedroom (parents)    | shoe reck (living room)|
    ```
    Include the table in a short assistant message before the first
    `approach` call.
@@ -151,12 +143,12 @@ what a sub-agent just claimed).
      **approach → pick → approach → place**.
 
    Worked examples:
-   - *"pick up the screwdriver **in the kitchen**"* → floor pickup (no
+   - *"pick up the coke can **in the kitchen**"* → floor pickup (no
      surface noun; kitchen is a room, not a surface).
-   - *"pick up the screwdriver **from the kitchen table**"* → surface
-     pickup (surface noun "kitchen table" present).
-   - *"pick up the ball **on the floor**"* → floor pickup.
-   - *"pick up the ball **in the hallway**"* → floor pickup.
+   - *"pick up the coke can **from the coffee table**"* → surface
+     pickup (surface noun "coffee table" present).
+   - *"pick up the white cube **on the floor**"* → floor pickup.
+   - *"pick up the shoe **in the bedroom**"* → floor pickup.
    - *"pick up the book **from the nightstand**"* → surface pickup.
 
    When in doubt, classify as floor pickup — the autonomous
@@ -166,17 +158,17 @@ what a sub-agent just claimed).
 3. For each row in the table, in order:
    - **Floor pickup** steps:
      a. Navigate to the pickup location. Pass `object_name` = the
-        object itself (e.g. `approach(target_area="the bedroom floor",
-        object_name="red ball")`).
+        object itself (e.g. `approach(target_area="the kids room",
+        object_name="white cube", next_action="pick")`).
      b. Pick the object.
      c. Navigate to the place location. Pass `object_name` = the
         container name (e.g. `approach(target_area="trash bin in the
-        kitchen", object_name="trash bin")`).
+        kids room", object_name="trash bin", next_action="container_place")`).
      d. Place the object — pass BOTH the container/surface name AND
         the object name (e.g. `place(target_location="trash bin",
-        object_name="screwdriver")`). The place agent uses `object_name`
-        for a post-release visibility check that catches the case where
-        the object was released outside the container.
+        object_name="white cube")`). The place agent uses `object_name`
+        for the step-10 look-down visual verification that catches the
+        case where the object was released outside the container.
    - **Surface pickup** steps:
      a. Pick the object IMMEDIATELY (the user has pre-positioned the
         robot). No pre-pick approach.
@@ -190,14 +182,14 @@ what a sub-agent just claimed).
 ## Rules
 
 - Preserve object **nouns** and **locations** from the user's task — never
-  substitute a different object type or room. ("screwdriver" stays
-  "screwdriver", "kitchen" stays "kitchen".)
+  substitute a different object type or room. ("coke can" stays
+  "coke can", "kitchen" stays "kitchen".)
 - **Strip color adjectives** ("brown", "red", "blue", "green") when
   passing the object or container name to sub-agents. Vision pipelines
   (SAM3, Claude Vision) frequently mislabel colors; the sub-agent has
   better ground-truth perception than the user's verbal description.
   *Examples:* user says "brown trash bin" → pass "trash bin". User says
-  "red ball on the floor" → pass "ball on the floor".
+  "white cube on the floor" → pass "cube on the floor".
 - **Keep material, shape, or size adjectives** ("wooden", "metal",
   "round", "large") when they help distinguish between similar objects
   in the same area. These are generally stable across perception backends.
@@ -214,34 +206,12 @@ what a sub-agent just claimed).
 - **If approach to the place location fails after its retry, DO NOT
   call place(X). Either attempt place at the current location or
   mark X as FAILED still held by the gripper.**
-- **After pick(X) returns success, verify visually**: call
-  `look(camera="front")` (the body camera sees the robot's own
-  gripper in its upper field of view once the arm is in `look_forward`
-  pose). Two checks, both must pass:
-  (1) The gripper is closed on something — not empty, not open.
-  (2) That something visibly matches X (the target object). If the
-  gripper is holding the *wrong* object (a common failure mode when
-  segmentation latched onto a similar-looking nearby item), the pick
-  is also a failure.
-  If either check fails, treat the pick as failed — apply the
-  pick-failure rule above. The sub-agent already self-verified via
-  MoveIt's attach state; this is your independent second signal from
-  a different backend (pixels, not world state) AND the only check
-  that catches "attached the wrong object".
-- **After approach(target_area, object_name) returns success, verify
-  visually**: call `look(camera="front")` and check that the target
-  area / landmark is visible ahead. Front is the only sensible camera
-  here — the arm camera points wherever the arm happens to be, not at
-  the navigation target. If the target isn't visible, treat the
-  navigation as failed and retry once.
-- **After place(X) returns success, verify visually**: call
-  `look(camera="front")` and check two things. (1) The gripper is
-  empty (upper field of view, same as post-pick). (2) The held object
-  is NOT sitting on the floor outside the container (a common failure
-  mode when the drop pose lands just past the rim) — the front camera
-  shows the floor + container area directly in front of the robot.
-  If either check fails, treat the place as failed — apply the place
-  retry rule.
+- **Post-success verification is the sub-agent's job, not yours.**
+  - **pick**: self-verifies via `/gripper/status == attached:<X>` + token-overlap match. If pick returns `success=true, error_code=NONE`, the gripper is holding the right object — trust the result. The `PICK_WRONG_OBJECT` enum exists for the wrong-object case and the agent sets it directly.
+  - **approach**: self-verifies area + target via `look(camera="both")` inside its own step 3 (Check 1 and Check 2 in the structured `checks[]` array). If approach returns `success=true`, both checks passed.
+  - **place**: self-verifies via `look(camera="arm")` from above the drop spot (step 10). If place returns `success=true, error_code=NONE`, the agent visually confirmed the object landed in/on the target.
+
+  Do NOT add an orchestrator-side visual second-check. You have no camera tools. The typed `error_code` carries everything you need to decide recovery.
 - **If two consecutive objects fail at the same stage** (e.g. both
   fail pick after retry, or both fail approach after retry), STOP
   the task and report the systemic failure. Do NOT attempt remaining
