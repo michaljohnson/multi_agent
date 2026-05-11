@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -49,11 +50,13 @@ async def test_pick(object_name: str):
     print(f"\n=== Testing pick executor: '{object_name}' ===\n")
 
     async with MCPClient() as mcp:
+        t0 = time.perf_counter()
         result = await execute_pick(
             mcp=mcp,
             object_name=object_name,
             model=EXECUTOR_MODEL,
         )
+        result["wall_seconds"] = round(time.perf_counter() - t0, 2)
         print(f"\n=== Pick Result ===")
         print(json.dumps(result, indent=2))
 
@@ -69,12 +72,14 @@ async def test_place(target_location: str, object_name: str):
     print()
 
     async with MCPClient() as mcp:
+        t0 = time.perf_counter()
         result = await execute_place(
             mcp=mcp,
             target_location=target_location,
             object_name=object_name,
             model=EXECUTOR_MODEL,
         )
+        result["wall_seconds"] = round(time.perf_counter() - t0, 2)
         print(f"\n=== Place Result ===")
         print(json.dumps(result, indent=2))
 
@@ -93,6 +98,7 @@ async def test_approach(
     print()
 
     async with MCPClient() as mcp:
+        t0 = time.perf_counter()
         result = await execute_approach(
             mcp=mcp,
             target_area=target_area,
@@ -100,6 +106,7 @@ async def test_approach(
             next_action=next_action,
             model=APPROACH_MODEL,
         )
+        result["wall_seconds"] = round(time.perf_counter() - t0, 2)
         print(f"\n=== Result ===")
         print(json.dumps(result, indent=2))
 
@@ -112,6 +119,7 @@ async def run_full(task: str):
     print(f"Executor:     {EXECUTOR_MODEL}\n")
 
     async with MCPClient() as mcp:
+        t0 = time.perf_counter()
         result = await run_orchestrator(
             mcp=mcp,
             task=task,
@@ -119,9 +127,12 @@ async def run_full(task: str):
             executor_model=EXECUTOR_MODEL,
             approach_model=APPROACH_MODEL,
         )
+        wall_seconds = round(time.perf_counter() - t0, 2)
         print(f"\n=== Final Report ===")
         print(result["summary"])
-        print(f"\nOrchestrator turns used: {result['turns_used']}")
+        print(f"\nOrchestrator turns used:    {result['turns_used']}")
+        print(f"Sub-agent tool calls total: {result['subagent_tool_calls_total']}")
+        print(f"Wall-clock total:           {wall_seconds}s ({wall_seconds / 60:.1f} min)")
 
 
 def main():
