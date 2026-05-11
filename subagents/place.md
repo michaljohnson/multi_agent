@@ -163,7 +163,7 @@ lower band. Both visible.
 4. **Reach check on coarse xy.** `dist = sqrt(cx² + cy²)`.
    - If `dist > 0.70m`: report FAILURE. Place does NOT drive the base
      — that's the approach agent's job. The approach agent (called with
-     mode='surface_place') was supposed to deliver the robot to ~0.45m
+     next_action='surface_place') was supposed to deliver the robot to ~0.45m
      standoff. If `dist > 0.70m` came back, either the centroid is
      biased very far from the actual target (rare), the segmentation
      latched onto the wrong region, or approach agent's approach failed.

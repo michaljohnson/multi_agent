@@ -82,14 +82,14 @@ async def test_place(target_location: str, object_name: str):
 async def test_approach(
     target_area: str,
     object_name: str,
-    mode: str,
+    next_action: str,
 ):
     """Test the approach agent with a natural language target area (no orchestrator)."""
     from multi_agent.subagents.approach import execute_approach
 
     print(f"\n=== Testing approach: '{target_area}' ===")
     print(f"    Target object: '{object_name}'")
-    print(f"    Mode: '{mode}'")
+    print(f"    Next action:   '{next_action}'")
     print()
 
     async with MCPClient() as mcp:
@@ -97,7 +97,7 @@ async def test_approach(
             mcp=mcp,
             target_area=target_area,
             object_name=object_name,
-            mode=mode,
+            next_action=next_action,
             model=APPROACH_MODEL,
         )
         print(f"\n=== Result ===")
@@ -161,7 +161,7 @@ def main():
         help="Target object context for approach agent (e.g. 'red coke can on the floor')",
     )
     parser.add_argument(
-        "--mode",
+        "--next-action",
         type=str,
         choices=["pick", "surface_place", "container_place", "floor_place"],
         default=None,
@@ -238,15 +238,15 @@ def main():
                 "job is to put the target in view; without one it has nothing "
                 "to verify)"
             )
-        if not args.mode:
+        if not args.next_action:
             parser.error(
-                "--test-approach requires --mode (picks the approach "
+                "--test-approach requires --next-action (picks the approach "
                 "standoff: 'pick' / 'floor_place' = 0.85m, "
                 "'container_place' = 0.65m, 'surface_place' = 0.45m). "
                 "The silent default to 'pick' previously broke downstream "
                 "places that needed a closer standoff."
             )
-        asyncio.run(test_approach(area, args.object_name, args.mode))
+        asyncio.run(test_approach(area, args.object_name, args.next_action))
     elif args.task:
         asyncio.run(run_full(args.task))
     else:

@@ -26,9 +26,9 @@ ORCHESTRATOR_TOOLS = [
                 "Find a named object in a target area and approach it. "
                 "Spawns an approach agent that drives to the area, visually "
                 "verifies arrival, finds the object (spin-searching if "
-                "needed), and closes to a mode-dependent standoff so the "
+                "needed), and closes to a next_action-dependent standoff so the "
                 "next step (pick or place) starts within arm-reach. The "
-                "`mode` argument selects the standoff: 0.85m for pick / "
+                "`next_action` argument selects the standoff: 0.85m for pick / "
                 "floor_place, 0.65m for container_place, 0.45m for "
                 "surface_place (UR5 needs to be close for top-down release "
                 "at table height)."
@@ -58,7 +58,7 @@ ORCHESTRATOR_TOOLS = [
                             "surface.)"
                         ),
                     },
-                    "mode": {
+                    "next_action": {
                         "type": "string",
                         "enum": [
                             "pick",
@@ -67,9 +67,9 @@ ORCHESTRATOR_TOOLS = [
                             "floor_place",
                         ],
                         "description": (
-                            "What the next agent will do after this approach "
-                            "completes. Determines approach standoff: "
-                            "'pick' / 'floor_place' = 0.85m, "
+                            "What the next subagent call will be after this "
+                            "approach completes. Determines the approach "
+                            "standoff: 'pick' / 'floor_place' = 0.85m, "
                             "'container_place' = 0.65m (drop-into bin), "
                             "'surface_place' = 0.45m (UR5 needs close standoff "
                             "for top-down release at table height — surface "
@@ -79,7 +79,7 @@ ORCHESTRATOR_TOOLS = [
                         ),
                     },
                 },
-                "required": ["target_area", "object_name", "mode"],
+                "required": ["target_area", "object_name", "next_action"],
             },
         },
     },
@@ -169,7 +169,7 @@ async def _handle_tool_call(
             mcp=mcp,
             target_area=tool_input["target_area"],
             object_name=tool_input["object_name"],
-            mode=tool_input["mode"],
+            next_action=tool_input["next_action"],
             model=approach_model,
         )
         return json.dumps(result)

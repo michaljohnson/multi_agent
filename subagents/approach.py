@@ -121,8 +121,8 @@ def _parse_robot_pose(raw) -> tuple[float | None, float | None, float | None]:
         return None, None, None
 
 
-# Mode-aware standoff lookup. The right standoff depends on what the
-# next agent will do once handoff completes:
+# Next-action-aware standoff lookup. The right standoff depends on what
+# the next agent will do once handoff completes:
 #   - pick: UR5 reaches forward at low z (~0.40m) — 0.85m centroid
 #     distance leaves comfortable headroom for grasp pose math.
 #   - surface_place: wrist must be HIGH (surface_z + 0.31m for can on
@@ -132,7 +132,7 @@ def _parse_robot_pose(raw) -> tuple[float | None, float | None, float | None]:
 #     above rim. Same UR5 high-z constraints apply but the rim is
 #     usually at moderate height, so 0.65m gives margin.
 #   - floor_place: similar to pick — soft set-down at low z.
-_STANDOFF_BY_MODE = {
+_STANDOFF_BY_NEXT_ACTION = {
     "pick": 0.85,
     "surface_place": 0.45,
     "container_place": 0.65,
@@ -507,7 +507,7 @@ async def _final_verify_gate(
         standoff_m: Target distance (meters) from segmented target after
             the approach hop. Default 0.85m for pick. Surface place
             should pass 0.45m, container place 0.65m. See
-            _STANDOFF_BY_MODE for the mode → standoff mapping.
+            _STANDOFF_BY_NEXT_ACTION for the next_action → standoff mapping.
     """
     if not result.get("success"):
         return result
@@ -551,12 +551,12 @@ async def execute_approach(
     mcp: MCPClient,
     target_area: str,
     object_name: str,
-    mode: str,
+    next_action: str,
     approach_pose: tuple[float, float, float] | None = None,
     model: str = None,
     max_tool_calls: int = 15,
 ) -> dict:
-    """Run a approach agent agent to move the robot to a destination area.
+    """Run an approach agent to move the robot to a destination area.
 
     Args:
         mcp: Connected MCPClient instance.
@@ -564,16 +564,16 @@ async def execute_approach(
                        (e.g. "kids room", "living room near the coffee table").
         object_name: Name of the object the approach agent must see at the
                        target_area before reporting success. Required —
-                       a approach agent with no specific target has nothing
+                       an approach agent with no specific target has nothing
                        to verify against; use a relocate-only tool if
                        pure repositioning without target verification
                        is what you want.
         approach_pose: Optional (x, y, yaw) in the map frame. If provided,
                        the approach agent drives directly to this pose. If not,
                        the approach agent reasons about where to go.
-        mode: What the next subagent call will be. Determines
-              `_approach_target` standoff via _STANDOFF_BY_MODE lookup.
-              Required — picking the wrong mode silently delivers the
+        next_action: What the next subagent call will be. Determines
+              `_approach_target` standoff via _STANDOFF_BY_NEXT_ACTION lookup.
+              Required — picking the wrong next_action silently delivers the
               robot at the wrong standoff and the downstream pick/place
               fails at its reach gate. Valid values: 'pick' (0.85m),
               'surface_place' (0.45m), 'container_place' (0.65m),
@@ -592,10 +592,10 @@ async def execute_approach(
             "it cannot verify arrival."
         )
 
-    standoff_m = _STANDOFF_BY_MODE.get(mode, 0.85)
-    if mode not in _STANDOFF_BY_MODE:
+    standoff_m = _STANDOFF_BY_NEXT_ACTION.get(next_action, 0.85)
+    if next_action not in _STANDOFF_BY_NEXT_ACTION:
         logger.warning(
-            f"Unknown approach agent mode '{mode}'; falling back to 0.85m standoff"
+            f"Unknown approach next_action '{next_action}'; falling back to 0.85m standoff"
         )
 
     all_tools = mcp.get_tools()
