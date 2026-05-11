@@ -13,15 +13,16 @@ release, and retract.
 
 ## Decide first: floor / surface / container?
 
-There are THREE placement classes. Only TWO are supported by this skill.
+There are THREE placement classes. ALL THREE go through the same
+**Unified procedure** below — only the parameters passed to
+`get_topdown_placing_pose` at step 3b differ.
 
 - **Floor placement** (e.g. "drop on the floor next to X", "place on
-  the floor by Y") — **NOT SUPPORTED.** Report immediately via
-  `report_place_result(success=false, error_code="PLACE_OUT_OF_SCOPE",
-  reason="floor placement not yet supported — requires dynamic
-  object-height measurement; use surface or container placement
-  instead.")`. See the "Floor placement — DEFERRED" section below for
-  the architectural reasoning.
+  the floor by Y") — the approach agent already positioned the robot
+  at the correct spot. The drop xy is the robot's *current pose's
+  forward direction* (no segmentation needed); the drop z is the
+  floor (`surface_height_m=0`) plus finger offset, object height, and
+  small clearance. Pass floor params at step 3b.
 
 - **Surface placement** (e.g. "place on the coffee table", "on the
   counter") — anything with a flat top to place ONTO. Segment the
@@ -29,50 +30,21 @@ There are THREE placement classes. Only TWO are supported by this skill.
   in the gripper and would block the arm cam's view at look-down).
   `get_topdown_placing_pose` is called with `object_height_m=<held
   object height>` so the tool computes a wrist-z that lands the
-  released object at `surface + top_clearance_m`. Use the
-  **Unified procedure** below — at step 3b pass surface params.
+  released object at `surface + top_clearance_m`. Pass surface params
+  at step 3b.
 
 - **Container** (bin, basket, bowl, drainer, wagon, box) — anything
   with a hollow opening to drop INTO. Segment the container from the
   front cam, drop with `top_clearance_m=0.35` and `object_height_m=0`
-  (default). Use the **Unified procedure** below — at step 3b pass
-  container params.
+  (default). Pass container params at step 3b.
 
-## Floor placement — DEFERRED
-
-**Floor placement is intentionally NOT supported in the current
-multi-agent demo.** Reasoning:
-
-- A correct soft set-down requires knowing the held object's height to
-  compute the right release wrist-z. Hardcoding object heights per
-  Gazebo model name (e.g., `Kitchen_Coke → 0.12m`) is a sim-only
-  cheat — it does not generalise to real-world deployment where the
-  agent has no a-priori model registry.
-- A single fixed safe-default (e.g., "always assume 12cm") works for
-  small canned-goods but bakes in another sim-specific assumption.
-- The proper architectural fix is **dynamic object-height measurement**
-  — `get_topdown_grasp_pose` returns the held object's bounding box
-  at pick time; that `bbox.size_z` should be passed through to place
-  (either via the orchestrator threading it to the place call, or via
-  place self-segmenting the held object on arm cam at look_forward).
-
-Until that measurement plumbing is wired up, **floor placement skill
-is intentionally absent** from this prompt. Tests with
-`target_location="floor"` should fall through to a clean FAILURE
-report rather than the agent improvising hardcoded numbers.
-
-For now, if the orchestrator requests "floor placement", the place
-agent should report:
-```
-FAILURE: floor placement not yet supported in this build — requires
-dynamic object-height measurement (pick.bbox.size_z → place input).
-Use surface placement (table/counter) or container placement (bin)
-instead.
-```
-
-Skip everything below this section if `target_location` is "floor"
-or implies floor placement. Otherwise continue to the Unified
-procedure for surface and container modes.
+**Note on object height**: floor and surface modes need the held
+object's height to compute a correct soft set-down. The "Held-object
+height table" at step 3b lists heights for the demo task family
+(cube, can, shoe, ball). This is a **sim-only convenience** — a real
+deployment would measure object height dynamically (e.g., from pick's
+`bounding_box.size.z`, threaded through the orchestrator). Listed as
+a known limitation for the thesis.
 
 ## Unified procedure (surface + container)
 
@@ -104,7 +76,30 @@ lower band. Both visible.
    `service_name="/clear_octomap"`, `service_type="std_srvs/srv/Empty"`,
    `request={}`.
 
-3. **Stage 1 — Coarse from FRONT camera:**
+3. **Compute place_pose.** Branches on placement mode.
+
+   **3-FLOOR** (drop on the floor next to a navigation landmark):
+   No segmentation needed — the approach agent already drove the
+   robot to the spot. Compute `place_pose` directly:
+   ```
+   object_height = <look up the held object's height from the table below>
+   place_pose = {
+     "position": {
+       "x": 0.40,                                 # 40cm forward of base_footprint
+       "y": 0.0,                                  # centered laterally
+       "z": 0.14 + object_height + 0.05           # finger + object + clearance
+     },
+     "orientation": [1, 0, 0, 0],
+     "frame_id": "base_footprint"
+   }
+   ```
+   The drop xy is fixed at (0.40, 0.0) in base_footprint — directly
+   in front of the robot, within UR5 envelope at low z. The drop z
+   leaves a 5cm air gap above the floor at release.
+   **Skip step 4** (reach check) — the fixed 0.40m xy is always in
+   reach. Proceed directly to step 5 (pre-place).
+
+   **3-SURFACE / 3-CONTAINER** (target is a thing to find):
    At standoff the held object hangs in front of the arm cam AND
    tall containers extend above the arm-cam frame. Front cam has the
    wider FOV needed to see both the held object AND the full target
@@ -134,11 +129,7 @@ lower band. Both visible.
       ```
       The tool computes `wrist_z = surface + 0.14 (finger) +
       object_height_m + 0.05`, so the released object lands ~5cm
-      above the surface and falls cleanly. The `x_bias_m=0.15` adds
-      15cm forward to the centroid x AFTER the mean — without it,
-      SAM3's front-cam horizontal view biases the centroid toward
-      the visible near-edge of the table top, leading to placements
-      at the table's front edge.
+      above the surface and falls cleanly.
 
       **Container mode** (bin/basket/bowl):
       ```
@@ -150,19 +141,18 @@ lower band. Both visible.
       ```
       Wrist sits 35cm above container rim; object falls in.
 
-      **Held-object height table** (use these unless you know better):
-      | Object | object_height_m |
-      |---|---|
-      | coke can | 0.12 |
-      | white cube (small) | 0.05 |
-      | shoe | 0.10 |
-      | small ball | 0.06 |
-      | unknown small object | 0.10 (safe default) |
-
       Take `(cx, cy, surface_height_m)` from the response. Pass
       `place_pose` directly to step 5 / step 6 — no further adjustment
-      needed. (Single-stage segmentation: stage-2 arm-cam refinement
-      was dropped 2026-05-11.)
+      needed.
+
+   **Held-object height table** (used by floor and surface modes):
+   | Object | object_height_m |
+   |---|---|
+   | coke can | 0.12 |
+   | white cube (small) | 0.05 |
+   | shoe | 0.10 |
+   | small ball | 0.06 |
+   | unknown small object | 0.10 (safe default) |
 
 4. **Reach check on coarse xy.** `dist = sqrt(cx² + cy²)`.
    - If `dist > 0.70m`: report FAILURE. Place does NOT drive the base
@@ -226,9 +216,8 @@ lower band. Both visible.
    vantage for the verification step below.
 
 10. **Verify drop landed in/on the target — visual look-down inspection.**
-    Skip this step in surface mode if `target_location == "floor"`
-    (out of scope). Otherwise run this for both container and surface
-    modes; it is the gate on success.
+    Run for all three modes (floor, surface, container); it is the gate
+    on success.
 
     a. Get the arm camera image (you are already looking down at the
        drop spot from step 9): `perception__look` with `camera="arm"`.
@@ -336,7 +325,7 @@ Args:
 - `success` (bool): `true` only if the held object was released at the intended drop pose and the arm retracted to look_forward. A ground-truth post-step verifier (front-camera SAM3 for the held object) may still override this to `false` if the object is still visible after release.
 - `error_code` (enum):
   - `NONE` — use on success.
-  - `PLACE_OUT_OF_SCOPE` — target_location is unsupported (e.g. "floor" before dynamic object-height plumbing is added).
+  - `PLACE_OUT_OF_SCOPE` — `target_location` is unsupported by this skill. Floor / surface / container modes are all in scope; this code only fires on truly unknown placement classes.
   - `PLACE_SEG_MISSED` — SAM3 could not find the target container on the front camera after the prompt + fallback chain. Approach agent did not deliver the robot to a viable standoff.
   - `PLACE_REACH_EXCEEDED` — computed drop pose `dist > 0.70m` from base, past UR5 place envelope. Approach agent must redeliver.
   - `PLACE_PLAN_FAILED` — MoveIt plan failed at pre-place / descent / release / retract even after `clear_planning_scene` recovery.

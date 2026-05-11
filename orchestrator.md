@@ -291,7 +291,7 @@ back to retry-once.
 | `error_code` | Recovery |
 |---|---|
 | `NONE` | Success — object released at/in the target. Proceed to the next object (if any). |
-| `PLACE_OUT_OF_SCOPE` | `target_location` is unsupported (e.g. literal "floor" before dynamic floor-place support exists). Mark the object as FAILED still held; if there's a fallback place target available in the task, try that instead. |
+| `PLACE_OUT_OF_SCOPE` | `target_location` is unsupported by the place skill. Floor, surface, and container modes are all supported now (as of 2026-05-11); this code only fires on truly unknown placement classes. Mark the object as FAILED still held; if there's a fallback place target available, try that instead. |
 | `PLACE_SEG_MISSED` | SAM3 couldn't find the target container/surface on the front camera. Re-call `approach` (delivery angle was poor); then retry `place`. |
 | `PLACE_REACH_EXCEEDED` | Drop pose past UR5 envelope (>0.70m). This usually means the prior `approach` was called with the wrong `next_action` (e.g., `pick` 0.85m standoff when `container_place` 0.65m was needed). Re-call `approach` with the CORRECT `next_action` for the target type, then retry `place`. |
 | `PLACE_PLAN_FAILED` | MoveIt intermittently rejected the pre-place or descent. Retry `place` ONCE. |
