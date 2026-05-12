@@ -27,8 +27,8 @@ from multi_agent.orchestrator import run_orchestrator
 
 # === CONFIGURATION ===
 
-# LLM model — provider-agnostic via LiteLLM. Set LLM_MODEL in your .env
-# to any model id LiteLLM recognises, e.g.:
+# LLM model — provider-agnostic via LiteLLM. Required env var. Set
+# LLM_MODEL in your .env to any model id LiteLLM recognises, e.g.:
 #   LLM_MODEL=gpt-4o                                # OpenAI
 #   LLM_MODEL=ollama/llama3                         # local Ollama
 #   LLM_MODEL=anthropic/claude-sonnet-4-20250514    # Anthropic
@@ -36,8 +36,13 @@ from multi_agent.orchestrator import run_orchestrator
 # Per-role overrides: ORCHESTRATOR_MODEL, EXECUTOR_MODEL, APPROACH_MODEL.
 # Whatever provider is selected, ensure its native API key env var is
 # exported (e.g. ANTHROPIC_API_KEY, OPENAI_API_KEY) — LiteLLM picks them
-# up automatically.
-LLM_MODEL = os.environ.get("LLM_MODEL", "anthropic/claude-sonnet-4-20250514")
+# up automatically. See .env.example for the full menu.
+LLM_MODEL = os.environ.get("LLM_MODEL")
+if not LLM_MODEL:
+    raise SystemExit(
+        "LLM_MODEL is not set. Copy multi_agent/.env.example to "
+        "multi_agent/.env and uncomment exactly one LLM_MODEL line."
+    )
 ORCHESTRATOR_MODEL = os.environ.get("ORCHESTRATOR_MODEL", LLM_MODEL)
 EXECUTOR_MODEL = os.environ.get("EXECUTOR_MODEL", LLM_MODEL)
 APPROACH_MODEL = os.environ.get("APPROACH_MODEL", LLM_MODEL)
