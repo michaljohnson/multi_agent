@@ -78,7 +78,14 @@ close, lift, return). Higher surfaces are out of scope.
 
 4. **Compute grasp pose** — `perception__get_topdown_grasp_pose` with
    `object_name="<object_name>"`. Returns a grasp pose in `base_footprint`
-   frame with the 14cm gripper finger offset already applied.
+   frame with the 14cm gripper finger offset already applied. The
+   `grasp_pose.orientation` field is **shape-aware**: a 2D PCA on the
+   segmented point cloud picks a gripper yaw that closes the fingers
+   across the object's short axis. For approximately round / square
+   footprints (`oriented: false` in the response, aspect_ratio < 1.2)
+   it falls back to the default top-down quaternion. **Always pass
+   `grasp_pose.orientation` straight through to `plan_and_execute` —
+   do NOT substitute a hardcoded quaternion.**
 
    **Sanity-check the centroid z** (in `centroid_base_frame.z`):
    - Floor objects should have z ≈ 0.02–0.10m (object resting on floor).
@@ -120,7 +127,11 @@ close, lift, return). Higher surfaces are out of scope.
 
 7. **Pre-grasp approach** — `moveit__plan_and_execute` with `group="arm"`,
    `target_type="pose"`,
-   `target={"position":[x, y, grasp_z + 0.10], "orientation":[1,0,0,0], "frame_id":"base_footprint"}`.
+   `target={"position":[x, y, grasp_z + 0.20], "orientation":<grasp_pose.orientation as [qx,qy,qz,qw]>, "frame_id":"base_footprint"}`.
+   The orientation is the shape-aware quaternion from step 4; convert
+   the `{x, y, z, w}` dict into a `[qx, qy, qz, qw]` list before passing
+   to MoveIt. The 20cm clearance gives a clean visual descent and
+   matches the lift height in step 11 for a symmetric approach silhouette.
 
 8. **Lower to grasp** — same as step 7 but with the exact grasp z position.
 
@@ -184,7 +195,13 @@ close, lift, return). Higher surfaces are out of scope.
   Never use the front camera for picking — its geometry is wrong for
   grasp computations.
 - FRAME: Always use `base_footprint`, NEVER `odom` or `map`.
-- ORIENTATION: Always use quaternion `[1,0,0,0]` for top-down grasp (w,x,y,z).
+- ORIENTATION: Use the `grasp_pose.orientation` returned by
+  `perception__get_topdown_grasp_pose`. Convert the `{x, y, z, w}` dict
+  to `[qx, qy, qz, qw]` before passing to MoveIt. Do not hardcode
+  `[1, 0, 0, 0]` — that would discard the PCA-derived yaw needed for
+  elongated objects (shoes, cans on their side, scissors). For round /
+  square footprints the tool already falls back to `[1, 0, 0, 0]`
+  (response field `oriented: false`).
 - The grasp pose from `get_topdown_grasp_pose` already includes the
   14cm gripper finger offset. Use it directly.
 - **`/gripper/status` is the ONLY ground truth for grasp state.** If
