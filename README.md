@@ -8,6 +8,11 @@ Originally built as one of three architectures compared in a BA thesis on "where
 
 The system is a three-tier agentic stack: an orchestrator LLM decomposes a natural-language task into sub-agent calls; each sub-agent is a separate LLM with a narrow MCP tool set and its own system prompt; the MCP layer below talks to the robot.
 
+## Short demo
+
+https://github.com/user-attachments/assets/883cf776-8e0a-4655-bed2-2917f652394b
+
+
 ## Comparison-axis position (vs. siblings)
 
 | Architecture | Where the policy lives | Planner LLM |
