@@ -117,38 +117,6 @@ facing south-west toward the TV cabinet.
   Same entry as kitchen, rotated. White dining table (~0.75m high)
   with 4 navy blue chairs, sitting visitor kid on a chair.
 
-### Pickable objects
-
-The objects the robot can pick up. Each row gives the world
-position, the entry pose to drive to first, and the SAM3
-prompt that works best.
-
-| Object | Position | Entry pose | Suggested prompt |
-|---|---|---|---|
-| Coke can | `(6.93, -2.97, 0.06)` — on the kitchen floor (south side, near doorway) | Kitchen (cooking) | `"coke can"` or `"red can on the floor"` |
-| Red shoe | `(-4.90, 0.87)` — bedroom floor, north side near the bed | Bedroom (parents) | `"red shoe"` |
-| White cube | `(-5.50, -2.98)` — kids room floor near the bunk bed (10cm) | Kids room | `"white cube"` |
-
-
-### Placeable locations
-
-Where the robot can drop / place a held object — surfaces,
-containers, and floor reference points. Pick the row that
-matches the task.
-
-| Location | Position | Entry pose | Notes |
-|---|---|---|---|
-| Wooden coffee table | `(1.50, 2.04, 0.33)` — living room | Living room (couch view) | Surface drop. ~0.45m high. |
-| Floor next to matching shoe | `(4.06, -3.61)` — living room east side, near shoe rack | Living room (TV view) | Floor drop. **Navigation landmark: `"shoe rack"`** (large, easy to segment) — the matching `LivingRoom_Shoe` is too small to use as the approach agent's object_name from across the room. |
-| Brown trash bin (kids room) | `(-4.19, -1.56)` — kids room, mid-east | Kids room | Drop INTO container. Renamed from LivingRoom_Trash → `KidsRoom_Trash` 2026-05-02. |
-
-### People in the scene (do NOT try to pick or interact)
-
-- Living room: walking person (animated actor) near the east
-  doorway.
-- Kitchen: casual female adult standing near the cooking bench.
-- Kids room: kid sitting in the NW corner.
-
 **The entry poses are STARTING coordinates** — drive there, then
 `look()` to see what you've got. Your only job is to get the robot
 into the right area; the deterministic post-step handles the rest.

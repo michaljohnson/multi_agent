@@ -15,6 +15,13 @@ logger = logging.getLogger(__name__)
 
 _SKILL_FILE = Path(__file__).parent / "approach.md"
 
+_STANDOFF_BY_NEXT_ACTION = {
+    "pick": 0.85,
+    "surface_place": 0.45,
+    "container_place": 0.65,
+    "floor_place": 0.85,
+}
+
 APPROACH_TOOLS = {
     "moveit__plan_and_execute",
     "nav2__navigate_to_pose",
@@ -132,12 +139,6 @@ def _parse_robot_pose(raw) -> tuple[float | None, float | None, float | None]:
 #     above rim. Same UR5 high-z constraints apply but the rim is
 #     usually at moderate height, so 0.65m gives margin.
 #   - floor_place: similar to pick — soft set-down at low z.
-_STANDOFF_BY_NEXT_ACTION = {
-    "pick": 0.85,
-    "surface_place": 0.45,
-    "container_place": 0.65,
-    "floor_place": 0.85,
-}
 
 
 async def _approach_target(
