@@ -87,6 +87,15 @@ close, lift, return). Higher surfaces are out of scope.
    `grasp_pose.orientation` straight through to `plan_and_execute` —
    do NOT substitute a hardcoded quaternion.**
 
+   **Record the held-object height for the downstream place call.**
+   The response also contains a `bounding_box` field. Read
+   `bounding_box.size.z` and remember it (in metres). You will pass
+   this value into `report_pick_result` as `held_object_height_m`.
+   The orchestrator forwards it to the next `place` call's
+   `object_height_m` argument, which means the place skill does NOT
+   need any per-object lookup table. The bounding box is measured by
+   SAM3 from the actual point cloud, so the value is object-agnostic.
+
    **Sanity-check the centroid z** (in `centroid_base_frame.z`):
    - Floor objects should have z ≈ 0.02–0.10m (object resting on floor).
    - Coffee table objects should have z ≈ 0.40–0.55m (table top + object height).
@@ -266,6 +275,7 @@ Args:
   - `PICK_ATTACH_TIMEOUT` — gripper closed but `/gripper/status` never reported attached within 8s + 5s retry.
   - `PICK_WRONG_OBJECT` — `/gripper/status` reported attached but the model name does not token-overlap with the target.
   - `PICK_HOLDING_ALREADY` — step 0 pre-check showed the gripper was already holding something.
+- `held_object_height_m` (number): the `bounding_box.size.z` value you read at step 4, in metres. The orchestrator passes this on to the next place call so the place skill needs no object-height lookup. Pass `0.0` on failure or when no bbox was obtained (PICK_SEG_MISSED, PICK_HOLDING_ALREADY).
 - `reason` (str): one or two sentences. Mention specific tool-call IDs or grasp coordinates if relevant.
 
 Anywhere this skill text says "report SUCCESS" or "report FAILURE", it means **call `report_pick_result`** with the appropriate `success` and `error_code`.

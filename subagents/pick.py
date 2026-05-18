@@ -66,6 +66,18 @@ REPORT_PICK_RESULT_TOOL = {
                     "type": "string",
                     "description": "One or two sentences justifying the result.",
                 },
+                "held_object_height_m": {
+                    "type": "number",
+                    "description": (
+                        "Height of the picked object in metres, measured "
+                        "from bounding_box.size.z of the SAM3 grasp-pose "
+                        "response at step 4. The orchestrator forwards "
+                        "this value into the next place call's "
+                        "object_height_m parameter so the place skill "
+                        "needs no per-object lookup. Pass 0.0 on failure "
+                        "or when no bbox was obtained."
+                    ),
+                },
             },
         },
     },
@@ -142,6 +154,9 @@ async def execute_pick(
                         "success": bool(tc_args.get("success", False)),
                         "error_code": tc_args.get("error_code", "NONE"),
                         "reason": tc_args.get("reason", ""),
+                        "held_object_height_m": float(
+                            tc_args.get("held_object_height_m", 0.0)
+                        ),
                         "tool_calls_used": tool_call_count,
                     }
 

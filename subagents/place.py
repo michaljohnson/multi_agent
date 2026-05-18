@@ -92,6 +92,7 @@ async def execute_place(
     mcp: MCPClient,
     target_location: str,
     object_name: str,
+    object_height_m: float,
     model: str = None,
     max_tool_calls: int = 25,
 ) -> dict:
@@ -109,11 +110,16 @@ async def execute_place(
         mcp: Connected MCPClient instance.
         target_location: Natural-language name of the drop target
             (e.g. "basket", "box", "kitchen table").
-        object_name: Name of the held object. Required — step 12's
+        object_name: Name of the held object. Required, step 12's
             visual look-down verify gate uses this as the label when
             deciding whether the released object landed in/on the
             target. The orchestrator should pass the same name the
             prior pick() call used.
+        object_height_m: Height of the held object in metres,
+            forwarded by the orchestrator from the prior pick
+            result's `held_object_height_m` (bounding-box-measured at
+            pick time). Floor and surface modes use this for the
+            wrist-z computation; container mode ignores it.
         model: LiteLLM model string. Defaults to LLM_MODEL env var.
         max_tool_calls: Safety cap on tool calls to prevent runaway.
 
@@ -126,16 +132,27 @@ async def execute_place(
             "(look-down vision verify) needs a label to decide whether "
             "the released object landed in/on the target."
         )
+    if object_height_m < 0.0:
+        raise ValueError(
+            f"execute_place requires object_height_m >= 0.0; got "
+            f"{object_height_m}. Forward held_object_height_m from the "
+            f"prior pick result; pass 0.0 only when no pick was run "
+            f"this turn (container mode ignores the value anyway)."
+        )
 
     all_tools = mcp.get_tools()
     tools = _filter_tools(all_tools) + [REPORT_PLACE_RESULT_TOOL]
 
     system_prompt = _SKILL_FILE.read_text()
     user_message = (
-        f"Place the currently held '{object_name}' on/into the "
-        f"'{target_location}' in front of you. Use '{object_name}' as "
-        f"the label when visually verifying the drop in step 12 (look-down "
-        f"vision check from the lift-clear pose)."
+        f"Place the currently held '{object_name}' (measured height "
+        f"{object_height_m:.3f} m, forwarded from the prior pick) "
+        f"on/into the '{target_location}' in front of you. Use "
+        f"'{object_name}' as the label when visually verifying the "
+        f"drop in step 12 (look-down vision check from the lift-clear "
+        f"pose). Use {object_height_m:.3f} m as the held-object height "
+        f"wherever the procedure needs it (floor and surface modes "
+        f"compute wrist-z from it; container mode ignores it)."
     )
 
     messages = [

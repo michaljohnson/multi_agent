@@ -48,10 +48,22 @@ task and manage a team of specialist agents to accomplish it.
   approach first). For **surface pickups** (table, counter, shelf), the
   user pre-positions the robot next to the surface, so call `pick`
   immediately without a preceding approach — see strategy below.
-- **place(target_location)** — Places the held object on/into a target
-  container or surface. The place agent perceives the target on its
-  front camera, computes the drop pose, and releases the object. The
-  robot must already be near the target (call approach first).
+- **place(target_location, object_name, object_height_m)** — Places
+  the held object on/into a target container or surface. The place
+  agent perceives the target on its front camera, computes the drop
+  pose, and releases the object. The robot must already be near the
+  target (call approach first).
+  - `target_location`: natural-language name of the drop target.
+  - `object_name`: the held object's name. Pass the same string the
+    prior pick used; the place agent uses it for the step-12 visual
+    look-down verify.
+  - `object_height_m`: the held object's height in metres. Pass the
+    `held_object_height_m` value from the prior pick result (the
+    bounding-box-measured height SAM3 reported at pick time).
+    Container mode ignores this; floor and surface modes need it for
+    a correct soft set-down. Pass `0.0` only when no pick was run
+    this turn (the gripper was already holding the object at session
+    start).
 
 ## Trust the sub-agents' typed results — you have no eyes
 
@@ -164,17 +176,24 @@ and gives a clean primitive-vs-policy boundary.
      c. Navigate to the place location. Pass `object_name` = the
         container name (e.g. `approach(target_area="trash bin in the
         kids room", object_name="trash bin", next_action="container_place")`).
-     d. Place the object — pass BOTH the container/surface name AND
-        the object name (e.g. `place(target_location="trash bin",
-        object_name="white cube")`). The place agent uses `object_name`
-        for the step-10 look-down visual verification that catches the
-        case where the object was released outside the container.
+     d. Place the object — pass `target_location`, `object_name`,
+        AND `object_height_m`. Read `held_object_height_m` from the
+        prior pick's result JSON and pass it through as
+        `object_height_m` (e.g. `place(target_location="trash bin",
+        object_name="white cube", object_height_m=0.05)` when pick
+        returned `held_object_height_m=0.05`). The place agent uses
+        `object_name` for the step-12 look-down visual verification
+        and `object_height_m` for the wrist-z computation in floor
+        and surface modes.
    - **Surface pickup** steps:
      a. Pick the object IMMEDIATELY (the user has pre-positioned the
         robot). No pre-pick approach.
      b. Navigate to the place location with `object_name` = container.
-     c. Place the object — pass BOTH `target_location` and `object_name`
-        so the post-release visibility check can verify the drop.
+     c. Place the object — pass `target_location`, `object_name`,
+        AND `object_height_m` (the `held_object_height_m` value from
+        the prior pick) so the post-release visibility check can
+        verify the drop and the wrist-z math is correct in floor and
+        surface modes.
 4. Process rows in table order. If an agent fails, note the reason and
    continue to the next row.
 5. After attempting all rows, retry failed ones once.

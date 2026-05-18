@@ -38,13 +38,16 @@ There are THREE placement classes. ALL THREE go through the same
   front cam, drop with `top_clearance_m=0.35` and `object_height_m=0`
   (default). Pass container params at step 3b.
 
-**Note on object height**: floor and surface modes need the held
-object's height to compute a correct soft set-down. The "Held-object
-height table" at step 3b lists heights for the demo task family
-(cube, can, shoe, ball). This is a **sim-only convenience** — a real
-deployment would measure object height dynamically (e.g., from pick's
-`bounding_box.size.z`, threaded through the orchestrator). Listed as
-a known limitation for the thesis.
+**Held-object height comes from the previous pick.** Floor and
+surface modes need the held object's height to compute a correct
+soft set-down. The orchestrator forwards the pick skill's measured
+`held_object_height_m` (taken from the SAM3 grasp-pose
+`bounding_box.size.z`) into this skill as the `object_height_m`
+parameter on the user message. Use that value wherever the procedure
+references the held object's height. No per-object lookup table is
+needed — the value is measured per pick, so the skill is object-
+agnostic by construction. Container mode ignores the value (the drop
+is from 35 cm above the rim regardless of object size).
 
 ## Unified procedure (surface + container)
 
@@ -80,9 +83,11 @@ lower band. Both visible.
 
    **3-FLOOR** (drop on the floor next to a navigation landmark):
    No segmentation needed — the approach agent already drove the
-   robot to the spot. Compute `place_pose` directly:
+   robot to the spot. Compute `place_pose` directly using the
+   `object_height_m` value from the user message (forwarded from
+   the prior pick's `held_object_height_m`):
    ```
-   object_height = <look up the held object's height from the table below>
+   object_height = <object_height_m from the user message>
    place_pose = {
      "position": {
        "x": 0.40,                                 # 40cm forward of base_footprint
@@ -123,7 +128,7 @@ lower band. Both visible.
       ```
       object_name = "<target surface>"
       top_clearance_m = 0.05      # air gap above surface at release
-      object_height_m = <held object's height — see table below>
+      object_height_m = <object_height_m value from the user message>
       x_bias_m = 0.0              # no bias for now — bias pushes past UR5 reach for surface place
       pointcloud_topic = "/front/segmented_pointcloud"
       ```
@@ -144,15 +149,6 @@ lower band. Both visible.
       Take `(cx, cy, surface_height_m)` from the response. Pass
       `place_pose` directly to step 5 / step 6 — no further adjustment
       needed.
-
-   **Held-object height table** (used by floor and surface modes):
-   | Object | object_height_m |
-   |---|---|
-   | coke can | 0.12 |
-   | white cube (small) | 0.05 |
-   | shoe | 0.10 |
-   | small ball | 0.06 |
-   | unknown small object | 0.10 (safe default) |
 
 4. **Reach check on coarse xy.** `dist = sqrt(cx² + cy²)`.
    - If `dist > 0.70m`: report FAILURE. Place does NOT drive the base
@@ -279,7 +275,7 @@ lower band. Both visible.
     `x_bias_m` parameter that compensates without a second SAM3 call.
   * Saves ~3 tool calls per place run.
 - **`get_topdown_placing_pose` parameters by mode:**
-  - Surface: `top_clearance_m=0.05` + `object_height_m=<held height>`.
+  - Surface: `top_clearance_m=0.05` + `object_height_m=<value from the user message>`.
     Tool computes `wrist_z = surface + 0.14 (finger) + object_height
     + 0.05`. Released object lands ~5cm above surface.
   - Container: `top_clearance_m=0.35`, `object_height_m=0` (default).

@@ -138,8 +138,20 @@ ORCHESTRATOR_TOOLS = [
                             "the prior pick() call used."
                         ),
                     },
+                    "object_height_m": {
+                        "type": "number",
+                        "description": (
+                            "Height of the held object in metres. "
+                            "Forward the `held_object_height_m` value "
+                            "from the prior pick result (bounding-box "
+                            "measured at pick time). Floor and surface "
+                            "place modes use this for wrist-z; container "
+                            "mode ignores it. Pass 0.0 only when no pick "
+                            "was run this turn."
+                        ),
+                    },
                 },
-                "required": ["target_location", "object_name"],
+                "required": ["target_location", "object_name", "object_height_m"],
             },
         },
     },
@@ -188,6 +200,7 @@ async def _handle_tool_call(
             mcp=mcp,
             target_location=tool_input["target_location"],
             object_name=tool_input["object_name"],
+            object_height_m=float(tool_input["object_height_m"]),
             model=executor_model,
         )
         return json.dumps(result)
