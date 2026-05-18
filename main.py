@@ -121,7 +121,8 @@ async def run_full(task: str):
     print(f"\n=== Task: {task} ===")
     print(f"Orchestrator: {ORCHESTRATOR_MODEL}")
     print(f"Approach:     {APPROACH_MODEL}")
-    print(f"Executor:     {EXECUTOR_MODEL}\n")
+    print(f"Pick:         {EXECUTOR_MODEL}")
+    print(f"Place:        {EXECUTOR_MODEL}\n")
 
     async with MCPClient() as mcp:
         t0 = time.perf_counter()
@@ -216,8 +217,15 @@ def main():
             }
 
             def format(self, record: logging.LogRecord) -> str:
-                tag = self._TAGS.get(record.name, f"[{record.name}]")
                 msg = record.getMessage()
+                # Section-break lines (e.g. "=== ORCHESTRATOR turn 1/50 ===")
+                # are printed without a tag prefix so they stand out as
+                # visual boundaries between orchestrator decisions and
+                # sub-agent dispatches. Same convention as the skill-based
+                # planner's per-decision section breaks.
+                if msg.startswith("==="):
+                    return msg
+                tag = self._TAGS.get(record.name, f"[{record.name}]")
                 if record.levelno >= logging.WARNING:
                     return f"{tag} {record.levelname}: {msg}"
                 return f"{tag} {msg}"

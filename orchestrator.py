@@ -251,6 +251,7 @@ async def run_orchestrator(
 
     while turn_count < max_turns:
         turn_count += 1
+        logger.info(f"=== ORCHESTRATOR turn {turn_count}/{max_turns} ===")
 
         response = call_llm(
             messages=messages,
@@ -267,6 +268,7 @@ async def run_orchestrator(
                     f"Orchestrator -> {tc_name}({json.dumps(tc_args)[:200]})"
                 )
 
+                logger.info(f"=== SUBAGENT: {tc_name} ===")
                 result = await _handle_tool_call(
                     mcp, tc_name, tc_args,
                     executor_model, approach_model,
@@ -285,7 +287,7 @@ async def run_orchestrator(
 
         elif is_done(response):
             final_text = get_text_content(response)
-            logger.info(f"Orchestrator finished:\n{final_text}")
+            logger.info(f"Orchestrator finished after {turn_count} turns")
             return {
                 "summary": final_text,
                 "turns_used": turn_count,
