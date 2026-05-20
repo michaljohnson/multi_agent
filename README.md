@@ -1,6 +1,6 @@
 # Multi-agent architecture
 
-A four-agent system for autonomous pick-and-place tasks on a Summit XL mobile manipulator (UR5 + Robotiq 2F-140) using ROS 2 Jazzy. Built with [LiteLLM](https://github.com/BerriAI/litellm) (provider-agnostic LLM client) and [MCP](https://modelcontextprotocol.io/) (Model Context Protocol) for robot control.
+A four-agent system for autonomous pick-and-place tasks on a [Summit XL](https://github.com/icclab/icclab_summit_xl) mobile manipulator (UR5 + Robotiq 2F-140) using ROS 2 Jazzy. Built with [LiteLLM](https://github.com/BerriAI/litellm) (provider-agnostic LLM client) and [MCP](https://modelcontextprotocol.io/) (Model Context Protocol) for robot control.
 
 Originally built as one of three architectures compared in a BA thesis on "where the policy should live" in agentic robotics; released so others can reuse the pattern.
 
@@ -13,12 +13,12 @@ The system is a three-tier agentic stack: an orchestrator LLM decomposes a natur
 https://github.com/user-attachments/assets/883cf776-8e0a-4655-bed2-2917f652394b
 
 
-## Comparison-axis position (vs. siblings)
+## Comparison-axis position 
 ![Overview architecture](docs/overview.png)
 
 | Architecture | Where the policy lives | Planner LLM |
 |---|---|---|
-| Single-agent | LLM context, raw MCP tool surface | Frontier (e.g. Claude Opus) |
+| [Single-agent](https://github.com/anthropics/claude-code) | LLM context, raw MCP tool surface | Frontier (e.g. Claude Opus) |
 | **Multi-agent** | **Orchestrator + 3 LLM sub-agents, narrow MCP subsets per agent** | **Frontier (e.g. Claude Opus)** |
 | [Skill-based](https://github.com/michaljohnson/skill_based) | Inside Python skills, hidden from the LLM | Small open-weights or frontier |
 
@@ -54,7 +54,6 @@ multi_agent/
     llm.py                 LiteLLM wrapper (provider-agnostic)
     mcp.py                 MCP connection manager
   docs/
-    architecture.png       3-level diagram (high/middle/low)
   .env.example             environment-variable template
   README.md                this file
 ```
@@ -67,8 +66,8 @@ cp multi_agent/.env.example multi_agent/.env
 
 # Single-skill smoke tests (assume robot is pre-positioned for pick/place):
 python3 -m multi_agent.main --test-pick "red coke can"
-python3 -m multi_agent.main --test-place "trash bin"
-python3 -m multi_agent.main --test-approach "kitchen" --object-name "wooden coffee table" --next-action pick
+python3 -m multi_agent.main --test-place "trash bin" --object-name "red coke can" --object-height-m 0.12
+python3 -m multi_agent.main --test-approach "living room" --object-name "wooden coffee table" --next-action pick 
 
 # Full orchestrator (long-horizon task):
 python3 -m multi_agent.main --task "pick up the red coke can in the kitchen and place it on the wooden coffee table in the living room"
@@ -83,10 +82,22 @@ python3 -m multi_agent.main --task "pick up the red coke can in the kitchen and 
 1. Orchestrator LLM receives the user task and three sub-agent tool schemas (`approach`, `pick`, `place`) plus `look()` for visual ground-truth checks.
 2. Orchestrator emits a sub-agent call (e.g. `approach(target_area="kitchen", object_name="red coke can", next_action="pick")`).
 3. The matching sub-agent in `subagents/` is invoked — it loads its own `.md` system prompt, sees its own narrow MCP tool subset (3-7 tools), and runs its own LLM loop.
-4. The sub-agent returns a structured result `{success: bool, reason: str, tool_calls_used: int, ...}` to the orchestrator.
+4. The sub-agent returns a structured result `{success: bool, error_code: str, reason: str, tool_calls_used: int, ...}` to the orchestrator.
 5. The orchestrator reads the result, optionally calls `look()` for visual confirmation, decides the next sub-agent or returns a final report.
 
 Each sub-agent has its own LLM context — the orchestrator does NOT see the sub-agents' internal MCP traces. This is the design point: each layer reasons over a narrower decision space than the layer above.
+
+## Typed error_code contract
+
+Every sub-agent terminates by calling its `report_*_result` tool with a typed `error_code` from a fixed enum (plus a prose `reason` for context). The orchestrator routes recovery decisions on the enum and reads the prose only for the long tail. This is the architectural contrast versus the skill-based sibling, which returns prose-only results.
+
+| Sub-agent | `error_code` values |
+|---|---|
+| approach | `NONE`, `NAV_PLAN_FAILED`, `NAV_DRIVE_FAILED`, `NAV_AREA_WRONG`, `NAV_TARGET_NOT_VISIBLE`, `NAV_VERIFY_OVERRIDE`, `UNKNOWN` |
+| pick | `NONE`, `PICK_SEG_MISSED`, `PICK_PLAN_FAILED`, `PICK_REACH_EXCEEDED`, `PICK_ATTACH_TIMEOUT`, `PICK_HOLDING_ALREADY`, `PICK_WRONG_OBJECT`, `UNKNOWN` |
+| place | `NONE`, `PLACE_SEG_MISSED`, `PLACE_PLAN_FAILED`, `PLACE_REACH_EXCEEDED`, `PLACE_DROP_VERIFY_FAILED`, `PLACE_HOLDING_NOTHING`, `PLACE_OUT_OF_SCOPE` |
+
+`NONE` means success. Anything else is a structured failure the orchestrator can branch on (retry the same sub-agent, dispatch a different one, or escalate to the user). The prose `reason` carries the specifics — coordinates, retry counts, perception confidence — that the enum doesn't capture.
 
 ## Adapting to your environment
 

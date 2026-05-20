@@ -66,14 +66,14 @@ async def test_pick(object_name: str):
         print(json.dumps(result, indent=2))
 
 
-async def test_place(target_location: str, object_name: str):
+async def test_place(target_location: str, object_name: str, object_height_m: float):
     """Test place executor on a single target (no orchestrator/approach).
 
     Assumes the robot is already holding an object and positioned near
     the drop target.
     """
     print(f"\n=== Testing place executor: target='{target_location}' ===")
-    print(f"    Held object: '{object_name}'")
+    print(f"    Held object: '{object_name}' (height={object_height_m:.3f}m)")
     print()
 
     async with MCPClient() as mcp:
@@ -82,6 +82,7 @@ async def test_place(target_location: str, object_name: str):
             mcp=mcp,
             target_location=target_location,
             object_name=object_name,
+            object_height_m=object_height_m,
             model=EXECUTOR_MODEL,
         )
         result["wall_seconds"] = round(time.perf_counter() - t0, 2)
@@ -190,6 +191,17 @@ def main():
         ),
     )
     parser.add_argument(
+        "--object-height-m",
+        type=float,
+        default=0.0,
+        help=(
+            "Held object height in metres (normally measured by pick and "
+            "forwarded by the orchestrator). Required with --test-place "
+            "for surface and floor drops; ignored for bin/trash containers "
+            "where the place agent drops from a fixed clearance."
+        ),
+    )
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Enable verbose logging",
@@ -291,7 +303,7 @@ def main():
                 "vision verify needs a label to decide whether the released "
                 "object landed in/on the target)"
             )
-        asyncio.run(test_place(args.test_place, args.object_name))
+        asyncio.run(test_place(args.test_place, args.object_name, args.object_height_m))
     elif args.test_approach:
         area = " ".join(args.test_approach)
         if not args.object_name:
