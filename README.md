@@ -54,7 +54,6 @@ multi_agent/
     llm.py                 LiteLLM wrapper (provider-agnostic)
     mcp.py                 MCP connection manager
   docs/
-    architecture.png       3-level diagram (high/middle/low)
   .env.example             environment-variable template
   README.md                this file
 ```
