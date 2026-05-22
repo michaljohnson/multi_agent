@@ -133,12 +133,48 @@ def _parse_robot_pose(raw) -> tuple[float | None, float | None, float | None]:
 #   - pick: UR5 reaches forward at low z (~0.40m) — 0.85m centroid
 #     distance leaves comfortable headroom for grasp pose math.
 #   - surface_place: wrist must be HIGH (surface_z + 0.31m for can on
-#     coffee table = 0.66m). UR5 top-down reach at z=0.66m caps at
-#     x≈0.55m, so approach agent needs to deliver closer (~0.45m).
+#     coffee table = 0.66m). UR5 top-down reach at z=0.66m caps near
+#     x=0.55m. The local costmap inflation around table-class targets
+#     prevents drive_on_heading from closing in below ~0.55m. The
+#     0.55m standoff is the operating-point compromise between the two.
 #   - container_place: drop INTO the bin from above; wrist sits 35cm
 #     above rim. Same UR5 high-z constraints apply but the rim is
 #     usually at moderate height, so 0.65m gives margin.
 #   - floor_place: similar to pick — soft set-down at low z.
+
+
+async def _approach_target_with_retry(
+    mcp: MCPClient,
+    object_name: str,
+    standoff_m: float = 0.85,
+) -> tuple[bool, str, int]:
+    """Drive to standoff with one retry on nav2 failure.
+
+    The deterministic ``nav2__approach_target`` primitive uses
+    ``drive_on_heading`` underneath, which intermittently fails with
+    NAVIGATION_FAILED when the local costmap has stale inflation around
+    the target (typical near furniture in a populated home scene). The
+    retry clears the costmaps and tries again, which resolves most
+    transient cases.
+
+    Returns: (success, info, tool_calls_used)
+    """
+    ok, info, calls = await _approach_target(mcp, object_name, standoff_m)
+    if ok:
+        return ok, info, calls
+
+    logger.info("   first attempt failed; clearing costmaps and retrying")
+    retry_calls = 0
+    try:
+        await mcp.call_tool_prefixed("nav2__clear_costmaps", {})
+        retry_calls += 1
+    except Exception as e:
+        logger.warning(f"  clear_costmaps failed before retry: {e}")
+        retry_calls += 1
+
+    ok2, info2, more_calls = await _approach_target(mcp, object_name, standoff_m)
+    combined_info = f"{info} | retry: {info2}"
+    return ok2, combined_info, calls + retry_calls + more_calls
 
 
 async def _approach_target(
@@ -177,7 +213,7 @@ async def _approach_target(
 
     target_dist = math.hypot(target_x_base, target_y_base)
     logger.info(
-        f"  [approach] target_base=({target_x_base:.2f},{target_y_base:.2f}) "
+        f"  target_base=({target_x_base:.2f},{target_y_base:.2f}) "
         f"dist={target_dist:.2f}m standoff={standoff_m:.2f}m -> nav2__approach_target"
     )
 
@@ -443,47 +479,229 @@ async def _final_verify_gate(
             if seg.get("status") == "SUCCESS":
                 segged_on = camera
                 logger.info(
-                    f"  [coords] SAM3 {camera} -> SUCCESS (centroid cached)"
+                    f"   SAM3 {camera} -> SUCCESS (centroid cached)"
                 )
                 break
             else:
                 logger.info(
-                    f"  [coords] SAM3 {camera} -> {seg.get('status', 'UNKNOWN')}"
+                    f"   SAM3 {camera} -> {seg.get('status', 'UNKNOWN')}"
                 )
         except Exception as e:
-            logger.error(f"  [coords] segment on {camera} failed: {e}")
+            logger.error(f"   segment on {camera} failed: {e}")
             result["tool_calls_used"] += 1
 
     if segged_on is None:
         logger.warning(
-            f"  [coords] SAM3 missed '{object_name}' on both cams — "
+            f"   SAM3 missed '{object_name}' on both cams — "
             f"skipping approach drive. Agent's look() said target was visible, "
             f"so handing off at the current pose; pick/place may still succeed."
         )
         result["reason"] = (
             f"{result['reason']}\n\n"
-            f"[coords] SAM3 missed on both cams; no approach drive."
+            f" SAM3 missed on both cams; no approach drive."
         )
         return result
 
     # Drive to within `standoff_m` of the target so pick/place can
-    # grasp/release directly without their own creep step.
-    approach_ok, approach_info, approach_calls = await _approach_target(
+    # grasp/release directly without their own creep step. Retry once
+    # on nav2 failure (clear_costmaps + retry) before declaring failure.
+    approach_ok, approach_info, approach_calls = await _approach_target_with_retry(
         mcp, object_name, standoff_m=standoff_m
     )
     result["tool_calls_used"] += approach_calls
     result["reason"] = (
         f"{result['reason']}\n\n"
-        f"[coords] segmented on {segged_on} cam."
-        f"\n[approach] {approach_info}."
+        f" segmented on {segged_on} cam."
+        f"\n {approach_info}."
     )
     if not approach_ok:
         logger.warning(
-            f"  [approach] FAILED: {approach_info} — handing off anyway "
-            f"(agent reported target visible; pick may still succeed if reachable)"
+            f"   FAILED after retry: {approach_info} — reporting "
+            f"failure so orchestrator re-calls approach instead of place"
         )
+        result["success"] = False
+        result["error_code"] = "NAV_DRIVE_FAILED"
+        for c in result.get("checks", []):
+            if c.get("name") == "target":
+                c["result"] = "FAIL"
+                c["note"] = (
+                    f"approach_target drive failed twice; standoff not reached. "
+                    + str(c.get("note", ""))
+                )
+                break
     return result
 
+
+
+async def _verify_area_via_vlm(
+    mcp: MCPClient,
+    target_area: str,
+    model: str | None,
+) -> tuple[bool, str, int]:
+    """Ask the VLM whether the front camera view matches ``target_area``.
+
+    The short-path skips LLM-driven navigation when SAM3 finds the target
+    near the current pose. SAM3 matches geometry only, so a wooden floor
+    or counter in the wrong room can satisfy a generic target prompt.
+    This helper closes that gap by passing the current front-camera frame
+    to the VLM and asking a yes/no question against the requested area.
+
+    Returns ``(in_area, reason, tool_calls)``. ``in_area`` is False on any
+    failure (look error, VLM error, ambiguous answer) so the short-path
+    fails closed and falls back to the LLM nav phase.
+    """
+    try:
+        image_blocks = await mcp.call_tool_prefixed_raw(
+            "perception__look", {"camera": "front"}
+        )
+    except Exception as e:
+        logger.debug(f"   look(front) failed during area check: {e}")
+        return False, f"look error: {e}", 1
+
+    user_content = image_blocks + [
+        {
+            "type": "text",
+            "text": (
+                f"Is this the {target_area}? Use room context "
+                f"(furniture, walls, floor, lighting) to decide. Reply "
+                f"with YES or NO on the first line, then a one-sentence "
+                f"reason. Be conservative: if the area is ambiguous or "
+                f"could be a different room, reply NO."
+            ),
+        }
+    ]
+    messages = [{"role": "user", "content": user_content}]
+
+    try:
+        response = call_llm(messages=messages, model=model, max_tokens=256)
+        text = (get_text_content(response) or "").strip()
+        first_line = text.split("\n", 1)[0].strip().upper()
+        in_area = first_line.startswith("YES")
+        return in_area, text[:200], 1
+    except Exception as e:
+        logger.debug(f"   VLM area check failed: {e}")
+        return False, f"VLM error: {e}", 1
+
+
+async def _try_short_path(
+    mcp: MCPClient,
+    object_name: str,
+    target_area: str,
+    model: str | None = None,
+) -> dict | None:
+    """Deterministic pre-check: is the target already visible from current pose?
+
+    Called at the start of every approach invocation. If SAM3 segments the
+    target on either camera AND the base-frame distance is within a
+    generous threshold AND a VLM confirms the front-camera view matches
+    ``target_area``, this returns a synthetic success result that
+    bypasses the LLM-driven navigation step. The verify gate
+    (``_final_verify_gate``) then handles the standoff drive from the
+    current pose.
+
+    The short-path matters on a second approach invocation for the same
+    target. The orchestrator has no state across sub-agent dispatches, so
+    without this check the approach agent always drives back to its entry
+    pose first, wasting time and tool calls. With the short-path, a
+    repeated approach call recognises that the robot is already near the
+    target and only needs to retry the standoff drive.
+
+    The VLM area check exists because SAM3 matches by geometry only and
+    can succeed on a same-shaped object in the wrong room (e.g. a wooden
+    floor matching a "wooden surface" prompt when the target lives in a
+    different area). The VLM gate makes the short-path conservative on
+    generic descriptors.
+
+    Returns: a synthetic success result dict if the short-path applies,
+    else None (the LLM-driven path must be invoked).
+    """
+    # Threshold tuned to "we are in the same room as the target". The
+    # deterministic approach_target drive can close several metres of
+    # straight-line distance reliably, so 3.0m is the operational ceiling
+    # below which the LLM is not needed.
+    SHORT_PATH_MAX_DIST_M = 3.0
+
+    tool_calls = 0
+    for camera in ("arm", "front"):
+        try:
+            seg_raw = await mcp.call_tool_prefixed(
+                "perception__segment_objects",
+                {"prompt": object_name, "camera": camera, "timeout": 20},
+            )
+            tool_calls += 1
+            seg = json.loads(seg_raw) if isinstance(seg_raw, str) else seg_raw
+            if seg.get("status") != "SUCCESS":
+                continue
+
+            try:
+                grasp_raw = await mcp.call_tool_prefixed(
+                    "perception__get_topdown_grasp_pose",
+                    {"object_name": object_name},
+                )
+                tool_calls += 1
+                grasp = json.loads(grasp_raw) if isinstance(grasp_raw, str) else grasp_raw
+                x = float(grasp["centroid_base_frame"]["x"])
+                y = float(grasp["centroid_base_frame"]["y"])
+                dist = math.hypot(x, y)
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+                logger.debug(f"   centroid read failed on {camera}: {e}")
+                continue
+
+            if dist > SHORT_PATH_MAX_DIST_M:
+                logger.debug(
+                    f"   target visible on {camera} but "
+                    f"{dist:.2f}m > {SHORT_PATH_MAX_DIST_M:.1f}m threshold"
+                )
+                continue
+
+            # Area gate: VLM must confirm the front-camera view matches
+            # target_area before the short-path is accepted. Prevents
+            # SAM3 generic-prompt matches in the wrong room.
+            in_area, area_reason, area_calls = await _verify_area_via_vlm(
+                mcp, target_area, model=model
+            )
+            tool_calls += area_calls
+            if not in_area:
+                logger.info(
+                    f"   target visible on {camera} cam at {dist:.2f}m, "
+                    f"but VLM says current view is NOT '{target_area}' — "
+                    f"falling back to LLM nav. ({area_reason[:80]})"
+                )
+                return None
+
+            logger.info(
+                f"   target visible on {camera} cam at {dist:.2f}m, "
+                f"area confirmed by VLM -> skipping LLM nav"
+            )
+            return {
+                "success": True,
+                "error_code": "NONE",
+                "reason": (
+                    f"Short-path: target visible on {camera} cam at "
+                    f"{dist:.2f}m, area '{target_area}' confirmed by VLM. "
+                    f"LLM navigation skipped."
+                ),
+                "checks": [
+                    {
+                        "name": "area",
+                        "result": "PASS",
+                        "note": (
+                            f"short-path + VLM: {target_area} confirmed "
+                            f"({area_reason[:80]})"
+                        ),
+                    },
+                    {
+                        "name": "target",
+                        "result": "PASS",
+                        "note": f"SAM3 {camera} segmented at {dist:.2f}m",
+                    },
+                ],
+                "tool_calls_used": tool_calls,
+            }
+        except Exception as e:
+            logger.debug(f"   segment on {camera} failed: {e}")
+
+    return None
 
 
 async def execute_approach(
@@ -491,7 +709,6 @@ async def execute_approach(
     target_area: str,
     object_name: str,
     next_action: str,
-    approach_pose: tuple[float, float, float] | None = None,
     model: str = None,
     max_tool_calls: int = 15,
 ) -> dict:
@@ -507,9 +724,6 @@ async def execute_approach(
                        to verify against; use a relocate-only tool if
                        pure repositioning without target verification
                        is what you want.
-        approach_pose: Optional (x, y, yaw) in the map frame. If provided,
-                       the approach agent drives directly to this pose. If not,
-                       the approach agent reasons about where to go.
         next_action: What the next subagent call will be. Determines
               `_approach_target` standoff via _STANDOFF_BY_NEXT_ACTION lookup.
               Required — picking the wrong next_action silently delivers the
@@ -537,34 +751,36 @@ async def execute_approach(
             f"Unknown approach next_action '{next_action}'; falling back to 0.85m standoff"
         )
 
+    logger.info(
+        f"Approach started: area='{target_area}' target='{object_name}' "
+        f"next_action='{next_action}' standoff={standoff_m:.2f}m"
+    )
+
+    # Deterministic short-path: if the target is already visible from
+    # current pose AND the VLM confirms the robot is in target_area, skip
+    # the LLM-driven navigation entirely. This is the common case on a
+    # repeated approach invocation, where the robot has not moved between
+    # calls and re-running the LLM nav loop is wasted motion. See
+    # ``_try_short_path`` docstring for the threshold + VLM gate rationale.
+    short_path_result = await _try_short_path(
+        mcp, object_name, target_area, model=model
+    )
+    if short_path_result is not None:
+        return await _final_verify_gate(
+            mcp, object_name, short_path_result, standoff_m=standoff_m
+        )
+
     all_tools = mcp.get_tools()
     tools = _filter_tools(all_tools) + [REPORT_APPROACH_RESULT_TOOL]
 
     system_prompt = _SKILL_FILE.read_text()
 
-    if approach_pose is not None:
-        x, y, yaw = approach_pose
-        user_message = (
-            f"Navigate to: \"{target_area}\"\n"
-            f"Target object to find: \"{object_name}\"\n"
-            f"Approach pose hint (map frame): x={x}, y={y}, yaw={yaw}\n\n"
-            "Drive to the approach pose and verify you are at the right "
-            "LOCATION (surface + room context) using look(camera=\"front\")."
-        )
-        max_tool_calls = 15  # arm tuck + nav + look + recovery headroom
-        logger.info(
-            f"Approach started (with pose hint): ({x}, {y}, {yaw}) "
-            f"area='{target_area}' target='{object_name}'"
-        )
-    else:
-        user_message = (
-            f"Navigate to: \"{target_area}\"\n"
-            f"Target object to find: \"{object_name}\"\n\n"
-            "No approach pose provided. Use perception to orient yourself, "
-            "reason about where the target area is, drive there, and "
-            "verify arrival."
-        )
-        logger.info(f"Approach started (open): area='{target_area}' target='{object_name}'")
+    user_message = (
+        f"Navigate to: \"{target_area}\"\n"
+        f"Target object to find: \"{object_name}\"\n\n"
+        "Use perception to orient yourself, reason about where the "
+        "target area is, drive there, and verify arrival."
+    )
 
     messages = [
         {"role": "system", "content": system_prompt},
