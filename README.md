@@ -8,7 +8,6 @@
 
 A four-agent system for autonomous pick-and-place tasks on a [Summit XL](https://github.com/icclab/icclab_summit_xl) mobile manipulator (UR5 + Robotiq 2F-140) using ROS 2 Jazzy. Built with [LiteLLM](https://github.com/BerriAI/litellm) (provider-agnostic LLM client) and [MCP](https://modelcontextprotocol.io/) (Model Context Protocol) for robot control.
 
-Originally built as one of three architectures compared in a BA thesis on "where the policy should live" in agentic robotics; released so others can reuse the pattern.
 
 ![Multi-agent architecture](docs/architecture.png)
 
@@ -19,8 +18,9 @@ The system is a three-tier agentic stack: an orchestrator LLM decomposes a natur
 https://github.com/user-attachments/assets/883cf776-8e0a-4655-bed2-2917f652394b
 
 
+Originally built as one of three architectures compared in a BA thesis on "where the policy should live" in agentic robotics; released so others can reuse the pattern.
+
 ## Comparison-axis position 
-![Overview architecture](docs/overview.png)
 
 | Architecture | Where the policy lives | Planner LLM |
 |---|---|---|
