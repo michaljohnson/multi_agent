@@ -1,10 +1,14 @@
 # Multi-agent architecture
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue)
-![Python](https://img.shields.io/badge/python-3.10%2B-blue)
-![ROS 2](https://img.shields.io/badge/ROS%202-Jazzy-22314e)
-![LiteLLM](https://img.shields.io/badge/LiteLLM-provider--agnostic-7e3fa8)
+![ROS 2](https://img.shields.io/badge/ROS%202-Jazzy-22314e?logo=ros)
+![Python](https://img.shields.io/badge/python-3.10%2B-yellow?logo=python)
+![LiteLLM](https://img.shields.io/badge/LiteLLM-Provider--Agnostic-7e3fa8)
 ![MCP](https://img.shields.io/badge/MCP-client-orange)
+![Nav2](https://img.shields.io/badge/Nav2-Navigation-brightgreen?logo=ros)
+![MoveIt](https://img.shields.io/badge/MoveIt-Motion%20Planning-0a7e8c)
+![SAM 3](https://img.shields.io/badge/SAM%203-Segmentation-red)
 ![Last commit](https://img.shields.io/github/last-commit/michaljohnson/multi_agent)
+
 
 A four-agent system for autonomous pick-and-place tasks on a [Summit XL](https://github.com/icclab/icclab_summit_xl) mobile manipulator (UR5 + Robotiq 2F-140) using ROS 2 Jazzy. Built with [LiteLLM](https://github.com/BerriAI/litellm) (provider-agnostic LLM client) and [MCP](https://modelcontextprotocol.io/) (Model Context Protocol) for robot control.
 
