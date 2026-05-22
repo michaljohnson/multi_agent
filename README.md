@@ -121,3 +121,11 @@ The hardcoded entry-pose table in `subagents/approach.md` is keyed to a particul
 ## Citing
 
 If you build on this work, please cite the BA thesis it originated from (forthcoming).
+
+## License
+
+See [LICENSE](LICENSE) for details.
+
+## Contributing
+
+Contributions welcome — please open an issue or PR on GitHub.
