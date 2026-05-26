@@ -169,8 +169,9 @@ async def _handle_tool_call(
     mcp: MCPClient,
     tool_name: str,
     tool_input: dict,
-    executor_model: str,
     approach_model: str,
+    pick_model: str,
+    place_model: str,
 ):
     """Handle a tool call from the orchestrator.
 
@@ -191,7 +192,7 @@ async def _handle_tool_call(
         result = await execute_pick(
             mcp=mcp,
             object_name=tool_input["object_name"],
-            model=executor_model,
+            model=pick_model,
         )
         return json.dumps(result)
 
@@ -201,7 +202,7 @@ async def _handle_tool_call(
             target_location=tool_input["target_location"],
             object_name=tool_input["object_name"],
             object_height_m=float(tool_input["object_height_m"]),
-            model=executor_model,
+            model=place_model,
         )
         return json.dumps(result)
 
@@ -216,8 +217,9 @@ async def run_orchestrator(
     mcp: MCPClient,
     task: str,
     orchestrator_model: str = None,
-    executor_model: str = None,
     approach_model: str = None,
+    pick_model: str = None,
+    place_model: str = None,
     max_turns: int = 50,
 ) -> dict:
     """Run the orchestrator agent with an open-ended task.
@@ -227,8 +229,9 @@ async def run_orchestrator(
         task: Natural language task description (e.g. "pick up the clamp
               from the coffee table and put it on the kitchen table").
         orchestrator_model: LiteLLM model string.
-        executor_model: LiteLLM model string for pick-and-place agents.
         approach_model: LiteLLM model string for the approach agent.
+        pick_model: LiteLLM model string for the pick agent.
+        place_model: LiteLLM model string for the place agent.
         max_turns: Safety cap on orchestrator turns.
 
     Returns:
@@ -271,7 +274,7 @@ async def run_orchestrator(
                 logger.info(f"=== SUBAGENT: {tc_name} ===")
                 result = await _handle_tool_call(
                     mcp, tc_name, tc_args,
-                    executor_model, approach_model,
+                    approach_model, pick_model, place_model,
                 )
                 # Aggregate sub-agent tool_calls_used into the orchestrator's
                 # total. Each sub-agent's result JSON contains a

@@ -33,10 +33,10 @@ from multi_agent.orchestrator import run_orchestrator
 #   LLM_MODEL=ollama/llama3                         # local Ollama
 #   LLM_MODEL=anthropic/claude-sonnet-4-20250514    # Anthropic
 #   LLM_MODEL=openai/qwen3-vl-...                   # any OpenAI-compatible
-# Per-role overrides: ORCHESTRATOR_MODEL, EXECUTOR_MODEL, APPROACH_MODEL.
-# Whatever provider is selected, ensure its native API key env var is
-# exported (e.g. ANTHROPIC_API_KEY, OPENAI_API_KEY) — LiteLLM picks them
-# up automatically. See .env.example for the full menu.
+# Per-role overrides: ORCHESTRATOR_MODEL, APPROACH_MODEL, PICK_MODEL,
+# PLACE_MODEL. Whatever provider is selected, ensure its native API key
+# env var is exported (e.g. ANTHROPIC_API_KEY, OPENAI_API_KEY) — LiteLLM
+# picks them up automatically. See .env.example for the full menu.
 LLM_MODEL = os.environ.get("LLM_MODEL")
 if not LLM_MODEL:
     raise SystemExit(
@@ -44,8 +44,9 @@ if not LLM_MODEL:
         "multi_agent/.env and uncomment exactly one LLM_MODEL line."
     )
 ORCHESTRATOR_MODEL = os.environ.get("ORCHESTRATOR_MODEL", LLM_MODEL)
-EXECUTOR_MODEL = os.environ.get("EXECUTOR_MODEL", LLM_MODEL)
 APPROACH_MODEL = os.environ.get("APPROACH_MODEL", LLM_MODEL)
+PICK_MODEL = os.environ.get("PICK_MODEL", LLM_MODEL)
+PLACE_MODEL = os.environ.get("PLACE_MODEL", LLM_MODEL)
 
 async def test_pick(object_name: str):
     """Test pick executor on a single object (no orchestrator/approach).
@@ -59,7 +60,7 @@ async def test_pick(object_name: str):
         result = await execute_pick(
             mcp=mcp,
             object_name=object_name,
-            model=EXECUTOR_MODEL,
+            model=PICK_MODEL,
         )
         result["wall_seconds"] = round(time.perf_counter() - t0, 2)
         print(f"\n=== Pick Result ===")
@@ -83,7 +84,7 @@ async def test_place(target_location: str, object_name: str, object_height_m: fl
             target_location=target_location,
             object_name=object_name,
             object_height_m=object_height_m,
-            model=EXECUTOR_MODEL,
+            model=PLACE_MODEL,
         )
         result["wall_seconds"] = round(time.perf_counter() - t0, 2)
         print(f"\n=== Place Result ===")
@@ -122,8 +123,8 @@ async def run_full(task: str):
     print(f"\n=== Task: {task} ===")
     print(f"Orchestrator: {ORCHESTRATOR_MODEL}")
     print(f"Approach:     {APPROACH_MODEL}")
-    print(f"Pick:         {EXECUTOR_MODEL}")
-    print(f"Place:        {EXECUTOR_MODEL}\n")
+    print(f"Pick:         {PICK_MODEL}")
+    print(f"Place:        {PLACE_MODEL}\n")
 
     async with MCPClient() as mcp:
         t0 = time.perf_counter()
@@ -131,8 +132,9 @@ async def run_full(task: str):
             mcp=mcp,
             task=task,
             orchestrator_model=ORCHESTRATOR_MODEL,
-            executor_model=EXECUTOR_MODEL,
             approach_model=APPROACH_MODEL,
+            pick_model=PICK_MODEL,
+            place_model=PLACE_MODEL,
         )
         wall_seconds = round(time.perf_counter() - t0, 2)
         print(f"\n=== Final Report ===")
