@@ -94,7 +94,7 @@ async def execute_place(
     object_name: str,
     object_height_m: float,
     model: str = None,
-    max_tool_calls: int = 25,
+    max_tool_calls: int = 30,
 ) -> dict:
     """Run a place agent to drop the held object into / onto a target.
 
