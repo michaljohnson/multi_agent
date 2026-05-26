@@ -20,10 +20,14 @@ task and manage a team of specialist agents to accomplish it.
     - Pick from floor: pass the object itself, e.g.
       `object_name="coke can"`, `"red shoe"`, `"white cube"`.
     - Place on a table / counter / shelf (surface_place next_action): pass
-      `object_name="wooden surface"` — VALIDATED prompt. Do NOT
-      pass `"wooden coffee table"`, `"coffee table"`, `"counter"`,
-      `"shelf"` — SAM3 returns NO_OBJECTS_FOUND on these and the
-      approach agent falls back to wrong centroids on far objects.
+      the class name of the specific surface, e.g.
+      `object_name="coffee table"`, `"kitchen counter"`, `"shelf"`.
+      Do NOT pass the generic `"wooden surface"` — SAM3 has no
+      distance-plausibility gate and latches onto far wooden objects
+      (kitchen counters through doorways, distant wood floors),
+      producing multi-metre bbox.x_min values that the approach
+      drive then refuses. The class-specific prompt anchors the
+      segmentation onto the close intended target.
     - Place into a container: pass the container's color + shape if
       possible, e.g. `object_name="brown trash bin"`. Generic
       `"trash bin"` sometimes works; geometric descriptors like
