@@ -6,7 +6,7 @@ simulation. The gripper is currently HOLDING an object.
 
 The approach agent just delivered you to the `next_action`-dependent
 standoff from the target (0.45m for `surface_place`, 0.65m for
-`container_place`, 0.85m for `floor_place`), facing it. The target was
+`container_place`, 0.90m for `floor_place`), facing it. The target was
 visually verified by the approach agent via `look()`, and the arm is in
 `look_forward`. Your job: position the held object above the target,
 release, and retract.
@@ -116,9 +116,11 @@ lower band. Both visible.
         misses category labels but anchors on shape + color +
         material. Examples:
         * trash bin → `"tall brown cylinder on the floor"`
-        * coffee table → `"wooden surface"` (validated 2026-05-05 —
-          the literal phrase that works when "coffee table" /
-          "wooden coffee table" both fail)
+        * coffee table → `"coffee table"` (class-specific prompt is
+          now the validated one. The earlier `"wooden surface"`
+          fallback returns SAM3 SUCCESS but on far wooden objects
+          with no distance gate, producing multi-metre bbox.x_min
+          values that the approach drive refuses)
         * shoe-rack reference → `"red shoe on the floor"`
       - If 3 prompts fail: report FAILURE — the approach agent contract
         guarantees visibility, so the handoff was wrong.
@@ -129,7 +131,16 @@ lower band. Both visible.
       object_name = "<target surface>"
       top_clearance_m = 0.05      # air gap above surface at release
       object_height_m = <object_height_m value from the user message>
-      x_bias_m = 0.0              # no bias for now — bias pushes past UR5 reach for surface place
+      x_bias_m = 0.0              # ignored when near_edge_inset_m > 0
+      near_edge_inset_m = 0.15    # wrist target = bbox.x_min + 0.15m,
+                                  # NOT the cloud centroid. Required for
+                                  # wide surfaces (coffee tables, desks)
+                                  # whose geometric middle sits beyond
+                                  # UR5 top-down reach. The 15cm inset
+                                  # keeps the released object well clear
+                                  # of the near rim (a 6cm-wide object
+                                  # ends up with ~12cm clearance from
+                                  # the front edge).
       pointcloud_topic = "/front/segmented_pointcloud"
       ```
       The tool computes `wrist_z = surface + 0.14 (finger) +
@@ -151,19 +162,21 @@ lower band. Both visible.
       needed.
 
 4. **Reach check on coarse xy.** `dist = sqrt(cx² + cy²)`.
-   - If `dist > 0.70m`: report FAILURE. Place does NOT drive the base
+   - If `dist > 0.90m`: report FAILURE. Place does NOT drive the base
      — that's the approach agent's job. The approach agent (called with
      next_action='surface_place') was supposed to deliver the robot to ~0.45m
-     standoff. If `dist > 0.70m` came back, either the centroid is
+     standoff. If `dist > 0.90m` came back, either the centroid is
      biased very far from the actual target (rare), the segmentation
      latched onto the wrong region, or approach agent's approach failed.
      Orchestrator will re-call approach.
-   - If `dist <= 0.70m`: proceed to step 5. Note: dist between 0.60m
-     and 0.70m is borderline — UR5 top-down reach at high wrist-z
-     (e.g. 0.66m for can-on-coffee-table) caps near 0.60m. If the
-     pre-place plan in step 5 fails, that's the geometry confirming
-     the borderline case; clear_planning_scene + retry once, then
-     report FAILURE so orchestrator can re-approach closer.
+   - If `dist <= 0.90m`: proceed to step 5. Note: dist between 0.70m
+     and 0.90m is borderline — UR5 top-down reach at high wrist-z
+     (e.g. 0.66m for can-on-coffee-table) tops out near 0.90m on this
+     mount. A validated single-agent place succeeded at wrist x=0.80m,
+     z=0.68m, so 0.70–0.90m is within reach but the IK margin is thin.
+     If the pre-place plan in step 5 fails, that's the geometry
+     confirming the borderline case; clear_planning_scene + retry
+     once, then report FAILURE so orchestrator can re-approach closer.
 
    The `place_pose` you carry forward is the stage-1 result. (Stage 2
    refinement was dropped 2026-05-11 — single-stage from front cam.)
@@ -270,14 +283,20 @@ lower band. Both visible.
   2026-05-11 because:
   * For container drops, the wrist sits 35cm above the rim and the
     object falls in — front-cam centroid xy is forgiving enough.
-  * For surface drops, the front-cam centroid biases toward the
-    visible near-edge; `get_topdown_placing_pose` accepts an
-    `x_bias_m` parameter that compensates without a second SAM3 call.
+  * For surface drops, the front-cam cloud spans the whole table top
+    and the geometric centroid sits inside the volume; pass
+    `near_edge_inset_m=0.15` so `get_topdown_placing_pose` returns
+    `wrist.x = bbox.x_min + 0.10`, the near edge of the table plus a
+    small inset. The cloud centroid would otherwise put the wrist
+    target past UR5e top-down reach even when the robot is at the
+    table edge.
   * Saves ~3 tool calls per place run.
 - **`get_topdown_placing_pose` parameters by mode:**
-  - Surface: `top_clearance_m=0.05` + `object_height_m=<value from the user message>`.
-    Tool computes `wrist_z = surface + 0.14 (finger) + object_height
-    + 0.05`. Released object lands ~5cm above surface.
+  - Surface: `top_clearance_m=0.05` + `object_height_m=<value from the user message>`
+    + `near_edge_inset_m=0.15`. Tool computes `wrist_z = surface +
+    0.14 (finger) + object_height + 0.05` and `wrist_x = bbox.x_min +
+    0.15`. Released object lands ~5cm above surface, 15cm from the
+    table's near edge.
   - Container: `top_clearance_m=0.35`, `object_height_m=0` (default).
     Wrist sits 35cm above container rim; object falls in.
 - The `place_pose` returned by `get_topdown_placing_pose` ALREADY
@@ -323,7 +342,7 @@ Args:
   - `NONE` — use on success.
   - `PLACE_OUT_OF_SCOPE` — `target_location` is unsupported by this skill. Floor / surface / container modes are all in scope; this code only fires on truly unknown placement classes.
   - `PLACE_SEG_MISSED` — SAM3 could not find the target container on the front camera after the prompt + fallback chain. Approach agent did not deliver the robot to a viable standoff.
-  - `PLACE_REACH_EXCEEDED` — computed drop pose `dist > 0.70m` from base, past UR5 place envelope. Approach agent must redeliver.
+  - `PLACE_REACH_EXCEEDED` — computed drop pose `dist > 0.90m` from base, past UR5 place envelope. Approach agent must redeliver.
   - `PLACE_PLAN_FAILED` — MoveIt plan failed at pre-place / descent / release / retract even after `clear_planning_scene` recovery.
   - `PLACE_HOLDING_NOTHING` — pre-check showed the gripper was not holding anything; nothing to release.
   - `PLACE_DROP_VERIFY_FAILED` — the runtime's post-release verifier rejected the agent's `success=true` because the object is still visible on the front camera. Usually set automatically by the runtime, not by the agent.

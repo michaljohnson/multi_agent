@@ -17,7 +17,7 @@ _SKILL_FILE = Path(__file__).parent / "approach.md"
 
 _STANDOFF_BY_NEXT_ACTION = {
     "pick": 0.85,
-    "surface_place": 0.45,
+    "surface_place": 0.55,
     "container_place": 0.65,
     "floor_place": 0.85,
 }
@@ -198,7 +198,8 @@ async def _approach_target(
     """
     tool_calls = 0
 
-    # Read cached centroid from perception (TF snapshot taken at segment time)
+    # Read cached centroid + base-frame bbox from perception (TF snapshot
+    # taken at segment time).
     try:
         grasp_raw = await mcp.call_tool_prefixed(
             "perception__get_topdown_grasp_pose",
@@ -206,14 +207,33 @@ async def _approach_target(
         )
         tool_calls += 1
         grasp = json.loads(grasp_raw) if isinstance(grasp_raw, str) else grasp_raw
-        target_x_base = float(grasp["centroid_base_frame"]["x"])
-        target_y_base = float(grasp["centroid_base_frame"]["y"])
+        centroid_x_base = float(grasp["centroid_base_frame"]["x"])
+        centroid_y_base = float(grasp["centroid_base_frame"]["y"])
+        bbox_base = grasp.get("bbox_base_frame")
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
         return False, f"failed to read cached centroid: {e}", tool_calls
 
+    # surface_place (standoff_m <= 0.55) targets a volumetric object. The
+    # centroid sits inside the volume, so "standoff 0.55m from centroid"
+    # would put the robot inside the object. Switch to the near-edge of
+    # the base-frame bbox so the standoff is measured from the front face.
+    # y stays at the bbox y-center so the robot still faces the object's
+    # middle. Other modes (pick / container_place / floor_place) target
+    # point-like objects where centroid is correct.
+    if standoff_m <= 0.55 and bbox_base is not None:
+        target_x_base = float(bbox_base["x_min"])
+        target_y_base = round(
+            (float(bbox_base["y_min"]) + float(bbox_base["y_max"])) / 2.0, 4
+        )
+        target_kind = "bbox.x_min (near-edge)"
+    else:
+        target_x_base = centroid_x_base
+        target_y_base = centroid_y_base
+        target_kind = "centroid"
+
     target_dist = math.hypot(target_x_base, target_y_base)
     logger.info(
-        f"  target_base=({target_x_base:.2f},{target_y_base:.2f}) "
+        f"  target_base=({target_x_base:.2f},{target_y_base:.2f}) {target_kind} "
         f"dist={target_dist:.2f}m standoff={standoff_m:.2f}m -> nav2__approach_target"
     )
 
@@ -466,9 +486,19 @@ async def _final_verify_gate(
     # reads. SAM3 is used here for COORDINATES only (centroid xy for the
     # approach driver), NOT as a yes/no visibility gate — the agent's
     # own look(camera="both") + LLM-vision in step 3 is the verification.
-    # Arm cam preferred (best handoff state); front cam fallback.
+    #
+    # Camera preference depends on the place agent's perspective:
+    #   - surface_place (standoff_m <= 0.55) re-segments on the front cam
+    #     at place time. If approach uses arm cam, the close-range arm view
+    #     of a wide surface biases the centroid to the near edge, so the
+    #     approach drive stops ~1m short of the front cam's table-middle
+    #     centroid that place will compute. Using the front cam here keeps
+    #     both phases anchored to the same point.
+    #   - pick / container_place / floor_place use arm cam at the next
+    #     phase, so arm cam first keeps the handoff in arm-cam FOV.
+    camera_order = ("front", "arm") if standoff_m <= 0.55 else ("arm", "front")
     segged_on = None
-    for camera in ("arm", "front"):
+    for camera in camera_order:
         try:
             seg_raw = await mcp.call_tool_prefixed(
                 "perception__segment_objects",
