@@ -103,7 +103,7 @@ async def execute_pick(
     mcp: MCPClient,
     object_name: str,
     model: str = None,
-    max_tool_calls: int = 30,
+    max_tool_calls: int = 50,
 ) -> dict:
     """Run a pick agent to grasp an object.
 

@@ -740,7 +740,7 @@ async def execute_approach(
     object_name: str,
     next_action: str,
     model: str = None,
-    max_tool_calls: int = 15,
+    max_tool_calls: int = 50,
 ) -> dict:
     """Run an approach agent to move the robot to a destination area.
 
