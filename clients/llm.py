@@ -107,6 +107,28 @@ litellm.suppress_debug_info = True
 litellm.modify_params = True
 
 
+# Module-level token accumulator. Every call_llm (orchestrator and all three
+# sub-agents) adds its usage here, so a full multi-agent run's LLM token cost is
+# the sum across all four roles. main.py resets at run start and reads the total
+# at the end.
+_token_usage = {"prompt": 0, "completion": 0}
+
+
+def reset_token_usage():
+    """Zero the cumulative LLM token counters (call at run start)."""
+    _token_usage["prompt"] = 0
+    _token_usage["completion"] = 0
+
+
+def get_token_usage():
+    """Return cumulative LLM token usage since the last reset."""
+    return {
+        "prompt_tokens": _token_usage["prompt"],
+        "completion_tokens": _token_usage["completion"],
+        "total_tokens": _token_usage["prompt"] + _token_usage["completion"],
+    }
+
+
 def call_llm(messages, tools=None, model=None, max_tokens=4096, max_retries=3):
     """Call an LLM via LiteLLM with retry on rate-limit errors.
 
@@ -132,6 +154,10 @@ def call_llm(messages, tools=None, model=None, max_tokens=4096, max_retries=3):
             # for vLLM-served Qwen endpoints that lack the server-side parser.
             # No-op for Anthropic / OpenAI native tool calls.
             _extract_hermes_tool_calls(response)
+            _usage = getattr(response, "usage", None)
+            if _usage is not None:
+                _token_usage["prompt"] += getattr(_usage, "prompt_tokens", 0) or 0
+                _token_usage["completion"] += getattr(_usage, "completion_tokens", 0) or 0
             return response
         except litellm.RateLimitError:
             if attempt < max_retries - 1:

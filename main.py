@@ -24,6 +24,7 @@ from multi_agent.clients.mcp import MCPClient
 from multi_agent.subagents.pick import execute_pick
 from multi_agent.subagents.place import execute_place
 from multi_agent.orchestrator import run_orchestrator
+from multi_agent.clients.llm import get_token_usage, reset_token_usage
 
 # === CONFIGURATION ===
 
@@ -127,6 +128,7 @@ async def run_full(task: str):
     print(f"Place:        {PLACE_MODEL}\n")
 
     async with MCPClient() as mcp:
+        reset_token_usage()
         t0 = time.perf_counter()
         result = await run_orchestrator(
             mcp=mcp,
@@ -142,6 +144,8 @@ async def run_full(task: str):
         print(f"\nOrchestrator turns used:    {result['turns_used']}")
         print(f"Sub-agent tool calls total: {result['subagent_tool_calls_total']}")
         print(f"Wall-clock total:           {wall_seconds}s ({wall_seconds / 60:.1f} min)")
+        _tok = get_token_usage()
+        print(f"LLM tokens total:           {_tok['total_tokens']} ({_tok['prompt_tokens']} prompt + {_tok['completion_tokens']} completion)")
 
 
 def main():
