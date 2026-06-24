@@ -27,6 +27,8 @@ Originally built as one of three architectures compared in a BA thesis on "where
 ## Comparison-axis position 
 
 | Architecture | Where the policy lives | Planner LLM |
+[BA FS 26_toff_193(1).pdf](https://github.com/user-attachments/files/29298091/BA.FS.26_toff_193.1.pdf)
+
 |---|---|---|
 | [Single-agent](https://github.com/anthropics/claude-code) | LLM context, raw MCP tool surface | Frontier (e.g. Claude Opus) |
 | **Multi-agent** | **Orchestrator + 3 LLM sub-agents, narrow MCP subsets per agent** | **Frontier (e.g. Claude Opus)** |
